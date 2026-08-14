@@ -1,0 +1,42 @@
+diff --git a/relaxed_networks.py b/relaxed_networks.py
+index 7a94b9f..6b1b6d4 100644
+--- a/relaxed_networks.py
++++ b/relaxed_networks.py
+@@ -102,6 +102,7 @@ class CombinedNetwork(nn.Module):
+                  threshold_min=0, bound_opts=None, dummy_input=None, device=None, no_r_net=False):
+         super(CombinedNetwork, self).__init__()
+         self.net = net
++        self.n_class = net.final_shape[1] if hasattr(net, 'final_shape') and net.final_shape is not None else 10
+         self.relaxed_net = relaxed_net
+         self.lossFn = lossFn
+         self.evalFn = evalFn
+@@ -163,7 +164,7 @@ class CombinedNetwork(nn.Module):
+     def get_LiRPA_losses(self, inputs, targets_abs, eps, domain, threshold_min=0, beta=0.5):
+         data_ub = torch.clamp(inputs + eps, max=1)
+         data_lb = torch.clamp(inputs - eps, min=0)
+-        n_class = self.net.n_class
++        n_class = self.n_class #self.net.n_class
+         final_node_name = None
+         loss_fusion = domain.startswith("lf")
+         domain = "l" + domain[2:] if domain.startswith("lf") else domain
+@@ -257,7 +258,7 @@ class CombinedNetwork(nn.Module):
+         if domain in ["zono", "box", 'zono_iter', 'hbox']:
+             _, ver_corr, threshold_n, abs_outputs = self.net.verify(inputs, targets, eps, domain, threshold_min, return_abs=True)
+ 
+-            if domain in ["box","hbox"] and self.net.n_class > 1:
++            if domain in ["box","hbox"] and self.n_class > 1:
+                 abs_loss = self.lossFn(-abs_outputs.concretize()[0], targets)
+             else:
+                 abs_loss = self.lossFn(abs_outputs.get_wc_logits(targets, True), targets)  # abs_outputs.ce_loss(targets_abs)
+diff --git a/scripts/evaluate_ACE b/scripts/evaluate_ACE
+index 0524ac9..11101f1 100644
+--- a/scripts/evaluate_ACE
++++ b/scripts/evaluate_ACE
+@@ -1,6 +1,6 @@
+ #!/bin/bash
+ 
+-python /home/mark/Projects/ACE/pruning/code/deepTrunk_main.py \
++python deepTrunk_main.py \
+     --train-mode cert \
+     --dataset cifar10 \
+     --net efficientnet-b0_pre \

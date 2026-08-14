@@ -1,0 +1,54 @@
+diff --git a/auto_LiRPA/bound_ops.py b/auto_LiRPA/bound_ops.py
+index 66b2ea4..cb2a505 100644
+--- a/auto_LiRPA/bound_ops.py
++++ b/auto_LiRPA/bound_ops.py
+@@ -251,7 +251,11 @@ class BoundReshape(Bound):
+         shape = list(shape)
+         for i in range(len(shape)):
+             if shape[i] == -1:
+-                shape[i] = np.prod(x.shape) // int(np.prod(shape[:i]) * np.prod(shape[(i + 1):]))
++                from functools import reduce
++                import operator
++                def prod(x):
++                    return reduce(operator.mul, x, 1)
++                shape[i] = prod(x.shape) // int(prod(shape[:i]) * prod(shape[(i + 1):]))
+         self.input_shape, self.shape = x.size(), shape
+         return x.reshape(shape)
+ 
+diff --git a/auto_LiRPA/parse_graph.py b/auto_LiRPA/parse_graph.py
+index 5b6855b..88cdd5f 100644
+--- a/auto_LiRPA/parse_graph.py
++++ b/auto_LiRPA/parse_graph.py
+@@ -18,6 +18,14 @@ def replace(name, scope):
+ def get_node_name(node):
+     return node.debugName()
+ 
++def get_node_attribute(node, attribute_name):
++    if hasattr(torch.onnx.symbolic_helper, '_node_get'):
++        # Pytorch >= 1.13.
++        return torch.onnx.symbolic_helper._node_get(node, attribute_name)
++    else:
++        # Pytorch <= 1.12. This will call _node_getitem in torch.onnx.utils.
++        return node[attribute_name]
++
+ def parse_graph(graph, inputs, params):
+     # in what scope is each node used as an input
+     scope = {}
+@@ -35,7 +43,7 @@ def parse_graph(graph, inputs, params):
+ 
+     nodesOP = []
+     for n in graph.nodes():
+-        attrs = {k: n[k] for k in n.attributeNames()}
++        attrs = {k: get_node_attribute(n, k) for k in n.attributeNames()}
+ 
+         n_inputs = [replace(get_node_name(i), scope) for i in n.inputs()]
+ 
+@@ -164,7 +172,7 @@ def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=No
+             _set_opset_version(11)
+         else:
+             _set_opset_version(12)
+-        trace_graph = torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
++        trace_graph = torch.onnx._optimize_graph(trace, torch.onnx.OperatorExportTypes.ONNX)
+ 
+     logger.debug('trace_graph: {}'.format(trace_graph))
+ 
