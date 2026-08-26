@@ -1,0 +1,16 @@
+{
+  "method": "mtl_ibp",
+  "eps": 0.0387696,
+  "epochs": 160,
+  "arch": "ace_c3",
+  "alpha": null,
+  "batch_size": 128,
+  "lr": 0.0005,
+  "seed": 42,
+  "std_acc": 0.4565,
+  "cert_acc": 0.2915000021457672,
+  "adv_acc": 0.325,
+  "eval_samples": 2000,
+  "train_seconds": 865.7,
+  "final_model": "/home/cvb46750/research/ctrain-work/runs/mtl_ibp_eps0.03876960/final_model_state.pt"
+}

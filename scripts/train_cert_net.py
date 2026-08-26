@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Train certified networks (SABR / MTL-IBP / IBP) on CIFAR-10 via CTRAIN.
-Track B, step B2 (ACE thesis). Full CIFAR-10 (no subset). Per run it saves:
+ACE thesis certified training. Full CIFAR-10 (no subset). Per run it saves:
   - ckpt/model_*.pt        CTRAIN wrapper checkpoints (every --ckpt-interval epochs)
-  - final_model_state.pt   raw model state_dict -> input for the B4 ACE bridge
+  - final_model_state.pt   raw model state_dict -> input for the ACE bridge
   - results.json           config + final std/cert/adv accuracy
   - logs/<run>.csv         ExperimentLogger CSV
 """
@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--arch", default="ace_c3")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--lr-milestones", type=str, default="80,90",
+                    help="comma-separated LR decay epochs (SABR paper: 120,140)")
     ap.add_argument("--run-dir", default=None)
     ap.add_argument("--data-root", default=os.path.expanduser("~/research/ctrain-work/data"))
     ap.add_argument("--device", default="cuda")
@@ -90,6 +92,8 @@ def main():
         model=model, input_shape=IN_SHAPE, eps=args.eps, num_epochs=args.epochs,
         lr=args.lr, device=args.device,
         checkpoint_save_path=os.path.join(args.run_dir, "ckpt", "model"),
+        lr_decay_kwargs={"milestones": tuple(int(m) for m in args.lr_milestones.split(",")),
+                         "gamma": 0.2},
         checkpoint_save_interval=args.ckpt_interval,
     )
     alpha_kw = ALPHA_KW[args.method]

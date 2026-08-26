@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 0 sanity check: train a small IBP model on a CIFAR-10 subset.
+"""Sanity check: train a small IBP model on a CIFAR-10 subset.
 
 Trains ~5 epochs on 1000 samples to verify CTRAIN works end-to-end.
 """

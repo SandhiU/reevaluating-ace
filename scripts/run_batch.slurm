@@ -19,7 +19,7 @@
 CONDA_BASE="$HOME/miniforge3"
 CONDA_ENV="env_ace"
 ACE_DIR="$HOME/research/ACE/ace_core"
-EXPERIMENTS="$HOME/research/scripts/experiments.csv"
+EXPERIMENTS="$HOME/research/scripts/experiments_v2.csv"
 TRAINED_DIR="$ACE_DIR/trained_models"
 
 module load CUDA

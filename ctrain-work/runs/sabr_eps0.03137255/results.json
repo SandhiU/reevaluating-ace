@@ -1,0 +1,16 @@
+{
+  "method": "sabr",
+  "eps": 0.03137254901,
+  "epochs": 160,
+  "arch": "ace_c3",
+  "alpha": null,
+  "batch_size": 128,
+  "lr": 0.0005,
+  "seed": 42,
+  "std_acc": 0.5435,
+  "cert_acc": 0.21550001204013824,
+  "adv_acc": 0.371,
+  "eval_samples": 2000,
+  "train_seconds": 1810.5,
+  "final_model": "/home/cvb46750/research/ctrain-work/runs/sabr_eps0.03137255/final_model_state.pt"
+}
