@@ -29,9 +29,11 @@ def read_summary(cert_log_path):
     with open(cert_log_path, "r") as f:
         reader = csv.reader(f, delimiter=";")
         header = next(reader)
-        # sanitize header (fields may be quoted)
         header = [h.strip('"').strip() for h in header]
         rows = list(reader)
+
+    # drop the trailing "total" summary row (nat_ok is a fraction there, not a flag)
+    rows = [r for r in rows if not (r and r[0].strip().lower() in ("total",))]
 
     if not rows:
         return None

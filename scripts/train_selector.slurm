@@ -43,6 +43,7 @@ EPS="0.00784313725"         # 2/255; use 0.03137254901 for 8/255
 BRANCH_NETS="C3_cifar10"
 GATE_NETS="C3_cifar10"      # only used for gate-type=net
 EXP_ID="1"
+EXP_NAME="dev"          # descriptive label -> models_new/cifar10/<exp_name>/...
 COTRAIN_ENTROPY="0.5"       # entropy joint-training weight (ACE default suggestion)
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --branch-nets) BRANCH_NETS="$2"; shift 2 ;;
         --gate-nets) GATE_NETS="$2"; shift 2 ;;
         --exp-id) EXP_ID="$2"; shift 2 ;;
+        --exp-name) EXP_NAME="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -63,6 +65,7 @@ CMD=(python deepTrunk_main.py \
     --train-mode train-diffAI \
     --dataset cifar10 \
     --exp-id "$EXP_ID" \
+    --exp-name "$EXP_NAME" \
     --n-branches 1 \
     --gate-type "$GATE_TYPE" \
     --net None \

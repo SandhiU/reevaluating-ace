@@ -4,7 +4,7 @@
 # pip install CTRAIN
 # pip install git+https://github.com/Verified-Intelligence/auto_LiRPA.git
 # pip install -r requirements.txt
-# bash apply_patches.sh # patch robustness deprecated torch imports
+# bash apply_patches.sh # fixes robustness + 2 ACE bugs (see README)
 
 efficientnet_pytorch
 numpy

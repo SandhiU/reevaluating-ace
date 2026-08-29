@@ -37,7 +37,10 @@ pip install -r requirements.txt
 bash apply_patches.sh    # fixes third-party packages (e.g. robustness)
 ```
 
-Two current dependency issues: CTRAIN needs `scikit-learn==1.8` (smac incompatibility), and the `robustness` package needs a patch (handled by `apply_patches.sh`).
+Two current dependency issues: CTRAIN needs `scikit-learn==1.8` (smac incompatibility), and `apply_patches.sh` fixes three third-party bugs:
+1. `robustness` — `torchvision.models.utils` removed in newer torchvision
+2. ACE `utils.py` — `load_net_state` shape-compare bug that breaks gate loading during selector training
+3. ACE `relaxed_networks.py` — missing `n_class` on `CombinedNetwork` that breaks entropy-gate evaluation
 
 ## Project structure
 
@@ -83,7 +86,7 @@ sbatch train_selector.slurm --branch ../converted/sabr_2_255.pt \
 
 ```bash
 sbatch eval_ace.slurm \
-    --load-model <composed model from step 3> \
+    --load-model <ACE model from step 3> \
     --gate-type net --gate-threshold 0.0,0.3,0.5,0.7,0.9 \
     --eps 0.00784313725
 ```

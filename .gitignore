@@ -25,6 +25,7 @@ models_new/
 # Our runs and converted branches
 runs/
 converted/
+results/
 
 # Slurm / logs
 logs/

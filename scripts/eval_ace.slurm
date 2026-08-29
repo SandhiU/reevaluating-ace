@@ -1,5 +1,5 @@
 #!/usr/bin/zsh
-#SBATCH --job-name=eval_composed
+#SBATCH --job-name=eval_ace
 #SBATCH --partition=c23g
 #SBATCH --account=thes2354
 #SBATCH --time=04:00:00
@@ -9,7 +9,7 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-# Evaluate a composed ACE model with ACE's built-in evaluation
+# Evaluate an ACE model (trunk+branch+gate) with ACE's built-in evaluation
 # (deepTrunk_main.py --train-mode cert). Sweeps --gate-threshold.
 #
 # Per-model settings (from ACE GitHub README):
@@ -26,22 +26,25 @@
 #   NOTE: entropy τ=-1.0 would mean H ≤ 1.0 nats — outside ACE's released
 #   grid ({-0.1 … -0.9}), don't use it for comparability.
 #
-# Usage:
-#   # SelectionNet gate, IBP branch, eps=2/255
+# Usage — exp-name must match the model family:
+#   # IBP branch, SelectionNet gate, eps=2/255
 #   sbatch --job-name=eval_ibp2_sel eval_ace.slurm \
-#       --load-model ../composed/ibp_2_255/composed_model.pt \
-#       --gate-type net --gate-threshold 0.0,0.3,0.5,0.7,0.9
+#       --load-model ../ace_models/ibp_2_255/ace_model.pt \
+#       --gate-type net --gate-threshold 0.0,0.3,0.5,0.7,0.9 \
+#       --exp-name ibp_2_255
 #
-#   # Entropy gate, IBP branch, eps=8/255
-#   sbatch --job-name=eval_ibp8_ent eval_ace.slurm \
-#       --load-model ../composed/ibp_8_255/composed_model_entropy.pt \
-#       --gate-type entropy --gate-threshold -0.1,-0.3,-0.5,-0.7,-0.9
+#   # SABR branch, entropy gate, eps=8/255
+#   sbatch --job-name=eval_sabr8_ent eval_ace.slurm \
+#       --load-model ../ace_models/sabr_8_255/ace_model_entropy.pt \
+#       --gate-type entropy --gate-threshold -0.1,-0.3,-0.5,-0.7,-0.9 \
+#       --exp-name sabr_8_255_entropy
 #
-#   # COLT branch -> zono relaxation
+#   # COLT branch, SelectionNet gate -> zono relaxation
 #   sbatch --job-name=eval_colt2_sel eval_ace.slurm \
-#       --load-model ../composed/colt_2_255/composed_model.pt \
+#       --load-model ../ace_models/colt_2_255/ace_model.pt \
 #       --gate-type net --cert-domain zono \
-#       --gate-threshold 0.0,0.3,0.5,0.7,0.9
+#       --gate-threshold 0.0,0.3,0.5,0.7,0.9 \
+#       --exp-name colt_2_255
 
 module load CUDA
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
@@ -53,7 +56,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 
 # --- defaults ---
-LOAD_MODEL=""               # required: branch+gate checkpoint (or full composed model)
+LOAD_MODEL=""               # required: branch+gate checkpoint (or full ACE model)
 TRUNK_MODEL=""              # trunk checkpoint; auto-derived from --eps if empty
 GATE_TYPE="net"             # net | entropy
 GATE_THRESHOLD=""           # required, comma-separated
@@ -64,6 +67,7 @@ NET="efficientnet-b0_pre"
 EPS="0.00784313725"         # 2/255; use 0.03137254901 for 8/255
 TEST_SET="test"
 EXP_ID="1"
+EXP_NAME="dev"          # descriptive run label -> models_new/cifar10/<exp_name>/...
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -78,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --eps) EPS="$2"; shift 2 ;;
         --test-set) TEST_SET="$2"; shift 2 ;;
         --exp-id) EXP_ID="$2"; shift 2 ;;
+        --exp-name) EXP_NAME="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -114,6 +119,7 @@ for TAU in ${(s:,:)GATE_THRESHOLD}; do
         --gate-type "$GATE_TYPE" \
         --gate-threshold "$TAU" \
         --exp-id "$EXP_ID" \
+        --exp-name "$EXP_NAME" \
         --train-batch 20 --test-batch 20 \
         --train-eps "$EPS" --test-att-n-steps 40 --test-att-step-size 0.035 \
         --test-set "$TEST_SET" \
