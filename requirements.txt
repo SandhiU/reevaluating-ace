@@ -1,0 +1,20 @@
+# Python: 3.11+
+
+# === Install order ===
+# pip install CTRAIN
+# pip install git+https://github.com/Verified-Intelligence/auto_LiRPA.git
+# pip install -r requirements.txt
+# bash apply_patches.sh # patch robustness deprecated torch imports
+
+efficientnet_pytorch
+numpy
+scikit-learn==1.8 # known bug currently that smac3 does not work with sklearn 1.9
+onnx2pytorch
+robustness
+forbiddenfruit
+six
+tabulate
+tables
+tqdm
+tensorboard
+pillow

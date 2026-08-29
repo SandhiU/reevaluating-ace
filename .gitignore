@@ -1,38 +1,43 @@
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.egg-info/
 .ipynb_checkpoints/
-.venv/
-venv/
-env/
-ctrain-env/
-.python-version
+.pytest_cache/
 
-# Dependencies — NOT vendored (pinned + patched in README)
+# ACE clone + old stuff
 ACE/
+old_ACE/
+old_scripts/
 
-# Weights / checkpoints / data (big or regenerable)
-*.pth
-*.pt
-*.ckpt
-*.onnx
-pretrained_models/
-checkpoints/
-data/
-*.tar
+# Data — keep data/ (holds cifar-10 .tar for download reference),
+# ignore the extracted batches
+cifar-10-batches-py/
 *.tar.gz
-*.zip
 
-# HPC / slurm artifacts
+# Model checkpoints (any .pt anywhere)
+*.pt
+*.pth
+*.ckpt
+trained_models/
+models_new/
+
+# Our runs and converted branches
+runs/
+converted/
+
+# Slurm / logs
+logs/
 slurm-*.out
 slurm-*.err
 *.log
-logs/
+nohup.out
 
-# OS / editors
+# Environments
+venv/
+env/
+ctrain-env/
+ace-env/
+
+# OS
 .DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.bak

@@ -1,77 +1,99 @@
-# ACE Evaluation Pipeline
+# Re-evaluating ACE
 
-Experiment configs, SLURM job scripts and result tooling for reproducing and
-extending Müller et al., *Boosting Certified Robustness with Compositional and
-Conditional Architectures* (ACE).
+Thesis project: re-evaluate ACE (Certify or Predict, Müller et al. 2021) with modern certified training methods — SABR, MTL-IBP — instead of the original IBP/CIBP/COLT branches.
 
-The two codebases this project builds on (ACE and auto_LiRPA) are not included
-here; they are pinned to specific commits and patched via the `.patch` files in
-`scripts/`.
+## How ACE works
 
-`scripts/` contains the experiment configs (`experiments.csv`), SLURM jobs for
-single and batch evaluation, a small training sanity check, a script that
-collects `cert_log.csv` results and compares them to the paper, and the two
-patches.
+An ACE model has three parts:
+
+| Part | Role | Who provides it |
+|---|---|---|
+| **Trunk** | Accurate network (EfficientNet-B0), not provably robust | ACE's released checkpoint, frozen |
+| **Branch** | Certifiably robust network (myNet C3) | We train these with CTRAIN |
+| **Selector** | Routes each input to trunk or branch | Trained by ACE's own code |
+
+The selector decides per input: if the branch can certify it, use the branch; otherwise fall back to the trunk. Two selector types exist: **SelectionNet** (a small network) and **Entropy** (route when the branch's output entropy is low).
+
+## Pipeline (CTRAIN to ACE)
+
+```
+1. train_cert_net.py      train a branch with CTRAIN        -> runs/<method>_eps<eps>/
+2. convert_format.py      CTRAIN checkpoint -> ACE format   -> converted/
+3. train_selector.slurm   ACE's selector training           -> ACE/models_new/...
+4. eval_ace.slurm         ACE's evaluation, sweep τ         -> cert_log.csv per run
+5. aggregate_ace_results.py  collect results into a table   -> results/all_results.csv
+```
+
+**ACE already implements selector training and evaluation** (steps 3-4).
 
 ## Setup
 
-Requires Python 3.8 and PyTorch 2.1.2. The original code is from 2021; the
-patches in this repo are needed to run it on current PyTorch.
-
 ```bash
-conda create -n ace python=3.8
+conda create -n ace python=3.11 -y
 conda activate ace
-pip install torch==2.1.2
+pip install CTRAIN
+pip install git+https://github.com/Verified-Intelligence/auto_LiRPA.git
+pip install -r requirements.txt
+bash apply_patches.sh    # fixes third-party packages (e.g. robustness)
 ```
 
-### ACE
+Two current dependency issues: CTRAIN needs `scikit-learn==1.8` (smac incompatibility), and the `robustness` package needs a patch (handled by `apply_patches.sh`).
+
+## Project structure
+
+```
+research/
+├── ACE/                # ACE codebase (clone; not tracked in git)
+├── data/               # CIFAR-10: cifar-10-batches-py + cifar-10-python.tar.gz
+│                       # (tar tracked in git; extracted batches gitignored)
+├── scripts/            # our scripts (this repo's content)
+├── runs/               # trained branches (gitignored)
+├── converted/          # branches in ACE format (gitignored)
+├── results/            # aggregated results
+├── requirements.txt
+├── apply_patches.sh
+└── README.md
+```
+
+### 1. Train a branch
 
 ```bash
-git clone https://github.com/eth-sri/ACE
-cd ACE
-git checkout 62db57971184ced80777771a5b0e88ab1d0562cf
-git apply /path/to/this/repo/scripts/ace_core.patch
+sbatch --job-name=crown_2 train_cert_net.slurm \
+    --method crown_ibp --eps 0.00784313725 --epochs 160 --lr-milestones 120,140
 ```
 
-The patch fixes `n_class` handling for efficientnet-b0_pre trunks and removes a
-hardcoded path from `scripts/evaluate_ACE`.
+Methods: `ibp`, `sabr`, `mtl_ibp`, `crown_ibp`. Eps: `0.00784313725` (2/255) or `0.03137254901` (8/255).
 
-### auto_LiRPA
+### 2. Convert to ACE format
 
 ```bash
-git clone https://github.com/KaidiXu/auto_LiRPA
-cd auto_LiRPA
-git checkout c8935c6
-git apply /path/to/this/repo/scripts/auto_lirpa.patch
-python setup.py install
+python convert_format.py --all
 ```
 
-The patch adds PyTorch 2.x compatibility: ONNX attribute access, the
-`_optimize_trace` to `_optimize_graph` rename, and a `BoundReshape` fix.
-
-### Pretrained models
-
-Download https://files.sri.inf.ethz.ch/ace/trained_models.zip and extract it to
-`ACE/ace_core/trained_models/`.
-
-## Usage
+### 3. Train the selector (uses ACE's code)
 
 ```bash
-sbatch scripts/run_experiment.slurm 36
-sbatch scripts/run_batch.slurm
+sbatch train_selector.slurm --branch ../converted/sabr_2_255.pt \
+    --gate-type net --eps 0.00784313725
 ```
 
-The SLURM scripts hardcode paths under `~/research/` and a cluster account
-`thes2354`; adjust them for your system.
+`--gate-type entropy` for the entropy selector.
 
-Results are written to `ACE/ace_core/models_new/cifar10/`. To collect them:
+### 4. Evaluate (τ sweep)
 
 ```bash
-python scripts/pull_results.py --markdown
+sbatch eval_ace.slurm \
+    --load-model <composed model from step 3> \
+    --gate-type net --gate-threshold 0.0,0.3,0.5,0.7,0.9 \
+    --eps 0.00784313725
 ```
 
-## Notes
+Two things that must match the model: `--gate-type` (`net`/`entropy`) and `--cert-domain` (`box` for IBP-style branches, `zono` for COLT). Entropy thresholds are negative (`-0.4` means "route if entropy ≤ 0.4").
 
-- `ace_results_evaluation.md` is generated by `pull_results.py`; regenerate it
-  after new runs instead of editing by hand.
-- The CTRAIN framework used for training is lab-owned and not included.
+### 5. Collect results
+
+```bash
+python aggregate_ace_results.py \
+    --results-dir ~/research/ACE/models_new \
+    --output ~/research/results/all_results.csv
+```

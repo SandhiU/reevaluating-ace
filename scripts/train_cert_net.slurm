@@ -6,14 +6,20 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=2G
-#SBATCH --output=logs/train_cert_%j.out
-#SBATCH --error=logs/train_cert_%j.err
-# Submit from ~/research/scripts after mkdir -p logs. Give each run a distinct
-# job name on the sbatch line (SBATCH lines are literal — no $VAR expansion).
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+# NOTE: SBATCH lines are read literally by Slurm (no $VAR expansion) — logs are
+# relative to the submission dir, so submit from ~/research/scripts after
+# `mkdir -p logs`. Give each run a distinct job name on the sbatch line:
+#   sbatch --job-name=sabr_2 train_cert_net.slurm --method sabr --eps 0.00784313725 --epochs 160
+
 module load CUDA
-source "$HOME/research/ctrain-env/bin/activate"
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda activate ace
 cd "$HOME/research/scripts" || exit 1
+
 echo "=== train_cert_net ($(hostname)) ==="
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
-python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}') "
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+
 python train_cert_net.py "$@"
