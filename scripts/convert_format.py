@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """Convert CTRAIN-trained branch checkpoints into ACE myNet format.
 
-ACE's selector scripts (train_ACE_Net_IBP / train_ACE_Entropy_IBP) load a
-branch via --load-branch-model. Our CTRAIN branches are plain nn.Sequential
-state dicts; this script swaps the branch weights into an ACE template
-checkpoint (C3_ACE_Net_IBP_cert_cifar10_{2,8}_255.pt), producing a checkpoint
-ACE can load directly.
+Our CTRAIN branches are plain nn.Sequential state dicts; this script swaps the
+branch weights into an ACE template checkpoint
+(C3_ACE_Net_IBP_cert_cifar10_{2,8}_255.pt).
+
+TWO output files per run — ACE has two DIFFERENT load paths and they need
+different key layouts (getting this wrong loads NOTHING, silently, because
+utils.load_net_state uses strict=False):
+
+  <method>_<eps>.pt         whole-dTNet state dict, keys `branchNet_0.*` /
+                            `gateNet_0.*`  -> use with `--load-model`
+                            (deepTrunk_main eval / --train-mode cert)
+  <method>_<eps>_branch.pt  BARE net state dict, keys `blocks.layers.*`
+                            -> use with `--load-branch-model` and
+                            `--load-gate-model` (selector training), same form
+                            as released ./trained_models/C3_cifar10_IBP_2_255.pt
 
 Outputs go to ~/research/converted/ (not into ACE's trained_models/, which
 holds the released checkpoints).
@@ -72,9 +82,17 @@ def convert_one(method, eps, eps_sfx):
     out = os.path.join(OUT, f"{method}_{eps_sfx}.pt")
     torch.save(tpl, out)
 
+    # bare branch state dict for --load-branch-model / --load-gate-model
+    prefix = branch + "."
+    bare = {k[len(prefix):]: v for k, v in tpl.items() if k.startswith(prefix)}
+    assert bare, f"no {prefix}* keys in template"
+    out_branch = os.path.join(OUT, f"{method}_{eps_sfx}_branch.pt")
+    torch.save(bare, out_branch)
+
     # sanity: first conv layer of branch matches source
     ok = torch.equal(tpl[f"{branch}.blocks.layers.1.weight"], torch.load(p, map_location="cpu")["0.weight"])
-    print(f"OK {method} {eps_sfx}: {n} tensors swapped -> {os.path.basename(out)} | verified: {ok}")
+    print(f"OK {method} {eps_sfx}: {n} tensors swapped -> {os.path.basename(out)} "
+          f"+ {os.path.basename(out_branch)} ({len(bare)} bare keys) | verified: {ok}")
 
 
 def main():

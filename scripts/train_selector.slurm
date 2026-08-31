@@ -19,13 +19,18 @@
 # Usage:
 #   # SelectionNet gate
 #   sbatch --job-name=sel_sabr2 train_selector.slurm \
-#       --branch ../converted/sabr_2_255.pt \
+#       --branch ../converted/sabr_2_255_branch.pt \
 #       --gate-type net --eps 0.00784313725
 #
 #   # Entropy gate (joint training)
 #   sbatch --job-name=sel_sabr2_ent train_selector.slurm \
-#       --branch ../converted/sabr_2_255.pt \
+#       --branch ../converted/sabr_2_255_branch.pt \
 #       --gate-type entropy --eps 0.00784313725
+#
+# ! --branch MUST be a BARE net state dict (keys `blocks.layers.*`), i.e. the
+#   *_branch.pt file from convert_format.py. Passing the whole-dTNet checkpoint
+#   (keys `branchNet_0.*`) loads ZERO weights silently (load_net_state uses
+#   strict=False) -> random branch, nat ~10%, cert 0. Guard below catches it.
 
 module load CUDA
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
@@ -61,6 +66,20 @@ done
 
 if [[ -z "$BRANCH" ]]; then echo "Error: --branch required"; exit 1; fi
 
+# --- guard: reject whole-dTNet checkpoints (they load as 0 keys, silently) ---
+python - "$BRANCH" << 'EOF'
+import sys, torch
+sd = torch.load(sys.argv[1], map_location="cpu")
+bad = [k for k in sd if k.startswith(("branchNet_", "gateNet_", "trunk"))]
+if bad:
+    sys.exit(f"ERROR: {sys.argv[1]} is a whole-dTNet checkpoint ({len(bad)}/{len(sd)} prefixed "
+             "keys). --load-branch-model needs a BARE state dict (blocks.layers.*): use *_branch.pt")
+if not any(k.startswith("blocks.") for k in sd):
+    sys.exit(f"ERROR: {sys.argv[1]} has no blocks.* keys: {list(sd)[:4]}")
+print(f"branch ckpt OK: {len(sd)} bare keys, e.g. {list(sd)[:2]}")
+EOF
+if [[ $? -ne 0 ]]; then exit 1; fi
+
 CMD=(python deepTrunk_main.py \
     --train-mode train-diffAI \
     --dataset cifar10 \
@@ -80,6 +99,7 @@ CMD=(python deepTrunk_main.py \
     --l1-reg 1e-5 --train-domain box --nat-factor 0.5 \
     --train-trunk False --gate-on-trunk False \
     --retrain-branch False \
+    --balanced-gate-loss --sliding-loss-balance 1.0 \
     --cert --cert-domain box \
     --test-freq 40 --test-set test)
 
