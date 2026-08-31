@@ -19,9 +19,21 @@ import os
 import re
 import sys
 
-# cert_log.csv column layout (from deepTrunk_main.py cert_deepTrunk_net):
-# img_id; label; nat_ok; pgd_ok; ver_ok_<domain>...; nat_branch; pgd_branch; ...
-# The "ver_ok_*" column(s) hold the certified flag; nat_ok the natural one.
+# cert_log.csv comes in TWO layouts under the same filename:
+#   stage="final"    cert_deepTrunk_net (deepTrunk_main.py) — the composed ACE net:
+#     img_id;label;nat_ok;pgd_ok;ver_ok_<dom>...;nat_branch;pgd_branch;branch_<i>_p...;branch_<i>_adv_p...
+#   stage="pre_gate"  diffAI_cert via get_gated_data (deepTrunk_main.py:270), written BEFORE gate
+#     training to build the gate targets — BRANCH-ONLY numbers, no routing:
+#     img_id;label;nat_ok;pgd_ok;ver_<dom>;ver_ok_<dom>;adv_threshold;cert_threshold_<dom>
+# Never compare the two: "pre_gate" rows are a branch report card, not an ACE result.
+
+
+def detect_stage(header):
+    if "nat_branch" in header:
+        return "final"
+    if "adv_threshold" in header:
+        return "pre_gate"
+    return "unknown"
 
 
 def read_summary(cert_log_path):
@@ -62,7 +74,7 @@ def read_summary(cert_log_path):
             if any(r[i].strip() == "1" for i in ver_ok if i < len(r))
         ) / n
 
-    return {"nat": nat, "pgd": pgd, "cert": cert, "n": n}
+    return {"nat": nat, "pgd": pgd, "cert": cert, "n": n, "stage": detect_stage(header)}
 
 
 def parse_run_dir(path):
@@ -78,8 +90,9 @@ def parse_run_dir(path):
     exp_id = os.path.basename(os.path.dirname(parent))
     exp_name = os.path.basename(os.path.dirname(os.path.dirname(parent)))
 
-    # tau is not in the path (it's in args.json) — try to read it
+    # tau/gate_type are not in the path (they're in args.json) — try to read them
     tau = None
+    gate_type = None
     args_path = os.path.join(path, "args.json")
     if os.path.exists(args_path):
         import json
@@ -111,13 +124,24 @@ def main():
     ap.add_argument("--output", required=True, help="Output CSV path")
     ap.add_argument("--label", default=None,
                     help="Optional extra label column (e.g. 'sabr_2_255')")
+    ap.add_argument("--version", default=None,
+                    help="Filter by version suffix in exp-name (e.g. 'v3' matches 'ibp_2_255_v3'). Use 'all' or omit for no filter.")
     args = ap.parse_args()
+
+    version_filter = None
+    if args.version and args.version != "all":
+        version_filter = args.version
 
     rows_out = []
     for root, dirs, files in os.walk(args.results_dir):
         if "cert_log.csv" not in files:
             continue
         meta = parse_run_dir(root)
+
+        # version filter: exp-name must end with _<version>
+        if version_filter and not meta["exp_name"].endswith(f"_{version_filter}"):
+            continue
+
         summary = read_summary(os.path.join(root, "cert_log.csv"))
         if summary is None:
             continue
@@ -128,6 +152,7 @@ def main():
             "eps": meta["eps"],
             "tau": meta["tau"],
             "gate_type": meta["gate_type"],
+            "stage": summary["stage"],
             "nat_acc": summary["nat"],
             "pgd_acc": summary["pgd"],
             "cert_acc": summary["cert"],
@@ -141,7 +166,7 @@ def main():
         print(f"No cert_log.csv found under {args.results_dir}")
         sys.exit(1)
 
-    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type",
+    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type", "stage",
               "nat_acc", "pgd_acc", "cert_acc", "n_samples", "run_dir"]
     fields = [f for f in fields if any(f in r for r in rows_out)]
 
@@ -153,7 +178,7 @@ def main():
 
     print(f"Wrote {len(rows_out)} runs to {args.output}")
     for r in sorted(rows_out, key=lambda x: (str(x.get("eps")), str(x.get("tau")))):
-        print(f"  eps={r['eps']} tau={r['tau']} gate={r['gate_type']} "
+        print(f"  eps={r['eps']} tau={r['tau']} gate={r['gate_type']} stage={r['stage']} "
               f"nat={r['nat_acc']:.4f} pgd={r['pgd_acc']:.4f} cert={r['cert_acc']:.4f}")
 
 

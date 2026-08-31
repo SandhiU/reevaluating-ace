@@ -17,14 +17,14 @@ The selector decides per input: if the branch can certify it, use the branch; ot
 ## Pipeline (CTRAIN to ACE)
 
 ```
-1. train_cert_net.py      train a branch with CTRAIN        -> runs/<method>_eps<eps>/
-2. convert_format.py      CTRAIN checkpoint -> ACE format   -> converted/
-3. train_selector.slurm   ACE's selector training           -> ACE/models_new/...
-4. eval_ace.slurm         ACE's evaluation, sweep τ         -> cert_log.csv per run
-5. aggregate_ace_results.py  collect results into a table   -> results/all_results.csv
+1. train_cert_net.py         train a branch with CTRAIN        -> runs/<method>_eps<eps>/
+2. convert_format.py         CTRAIN checkpoint -> ACE format   -> converted/
+3. train_selector.slurm      ACE's selector training           -> ACE/models_new/...
+4. eval_ace.slurm            ACE's evaluation, sweep τ         -> cert_log.csv per run
+5. aggregate_ace_results.py  collect results into a table      -> results/agg_<ver>.csv
 ```
 
-**ACE already implements selector training and evaluation** (steps 3-4).
+**ACE already implements selector training and evaluation** (steps 3-4). Use the pipeline scripts above to run all models at once.
 
 ## Setup
 
@@ -41,6 +41,36 @@ Two current dependency issues: CTRAIN needs `scikit-learn==1.8` (smac incompatib
 1. `robustness` — `torchvision.models.utils` removed in newer torchvision
 2. ACE `utils.py` — `load_net_state` shape-compare bug that breaks gate loading during selector training
 3. ACE `relaxed_networks.py` — missing `n_class` on `CombinedNetwork` that breaks entropy-gate evaluation
+
+## Quick start — pipeline scripts
+
+Instead of constructing `sbatch` commands manually, use the convenience scripts in `scripts/`. They call the slurm files with correct parameters pre-set for all models.
+
+```bash
+# Run the full pipeline (pauses between stages)
+bash pipeline.sh all v1
+
+# Or run stages individually:
+bash pipeline.sh train v1              # Stage 1: train cert networks
+bash pipeline.sh convert               # Stage 2: convert to ACE format
+bash pipeline.sh selector v1 --sel     # Stage 3: SelNet only
+bash pipeline.sh selector v1 --ent     # Stage 3: Entropy only
+bash pipeline.sh eval v1 --both        # Stage 4: evaluate everything
+
+# Check what's done:
+bash pipeline.sh status eval_v1
+
+# Aggregate results into a CSV:
+bash aggregate_results.sh v1           # → results/agg_v1.csv
+bash aggregate_results.sh all          # → results/agg_all.csv
+```
+
+Stage 3 accepts a custom converted directory if you're reusing branches from a previous run:
+```bash
+bash 03_train_selector_all.sh v1 --both ~/research/converted
+```
+
+See `00_config.sh` for all shared paths and hyperparameters.
 
 ## Project structure
 
