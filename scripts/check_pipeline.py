@@ -88,6 +88,26 @@ def mode_norm():
     print("match expected    : True (verified on released checkpoint)")
 
 
+def _load_with_numel_fix(net, sd):
+    """Mirror ACE's load_net_state: direct strict=False load, falling back to a
+    numel-matching view for shape differences (the Normalization block is saved as
+    (1,3,1,1) but the model expects (3,1,1) -- same total elements, so this is safe).
+    Returns (missing, unexpected, numel_fixed).
+    """
+    try:
+        missing, unexpected = net.load_state_dict(sd, strict=False)
+        return missing, unexpected, []
+    except RuntimeError:
+        sdn = net.state_dict()
+        fixed = []
+        for k, v in sd.items():
+            if k in sdn and v.numel() == sdn[k].numel():
+                sdn[k] = v.view(sdn[k].shape)
+                fixed.append(k)
+        missing, unexpected = net.load_state_dict(sdn, strict=False)
+        return missing, unexpected, fixed
+
+
 def mode_keys(branch="ibp_2_255_branch.pt"):
     print(f"=== key-count check: converted/{branch} ===")
     args = _args()
@@ -99,10 +119,22 @@ def mode_keys(branch="ibp_2_255_branch.pt"):
                                              32, 3, 10)
     exit_idx = dTNet.exit_ids[1]   # the single branch exit (trunk = -1, branch = 0)
     sd = torch.load(os.path.join(CONVERTED, branch), map_location="cpu")
-    missing, unexpected = dTNet.branch_nets[exit_idx].load_state_dict(sd, strict=False)
-    print(f"missing:   {len(missing)}")
-    print(f"unexpected:{len(unexpected)}")
-    print("OK" if not missing and not unexpected else "CHECK: conversion problem")
+    missing, unexpected, fixed = _load_with_numel_fix(dTNet.branch_nets[exit_idx], sd)
+    # dead template artifacts (popup_score/pre_mask/legacy 'b') are expected to be
+    # dropped on load; the real parameters are the weight/bias/deepz/normalization keys.
+    dead = [k for k in unexpected if "popup" in k or "pre_mask" in k
+            or k.endswith(".b") or ".b." in k]
+    real_unexpected = [k for k in unexpected if k not in dead]
+    print(f"missing:          {len(missing)}")
+    print(f"unexpected:       {len(unexpected)}  (of which dead template artifacts: {len(dead)})")
+    if real_unexpected:
+        print(f"  unexpected real params: {real_unexpected[:6]}")
+    if fixed:
+        print(f"numel-fix applied: {len(fixed)} keys (normalization shape (1,3,1,1)->(3,1,1) is expected)")
+    mean = sd.get("blocks.layers.0.mean")
+    if mean is not None:
+        print("layers.0.mean:", mean.flatten().tolist())
+    print("OK" if not missing and not real_unexpected else "CHECK: conversion problem")
 
 
 def mode_equiv(n=32, seed=0):
@@ -110,14 +142,12 @@ def mode_equiv(n=32, seed=0):
     args = _args()
     lossFn = torch.nn.CrossEntropyLoss(reduction="none")
     evalFn = lambda x: torch.max(x, dim=1)[1]
-    _, _, test_loader, input_size, input_channel, n_class = get_loaders(args)
+    # No dataset needed: the equivalence check only requires the SAME inputs to both
+    # networks. Use fixed-seed random inputs (32x32, 3 channels) so the check is
+    # instant and does not depend on the (slow, network-mounted) CIFAR cache.
     torch.manual_seed(seed)
-    samples = []
-    for x, y in test_loader:
-        samples.append(x)
-        if len(torch.cat(samples)) >= n:
-            break
-    xs = torch.cat(samples)[:n]
+    xs = torch.rand(n, 3, 32, 32)
+    input_size, input_channel, n_class = 32, 3, 10
 
     # 1) released branch file vs template branchNet_0 (must be identical)
     rel = torch.load(os.path.join(ACE, "trained_models", "C3_cifar10_IBP_2_255.pt"),
@@ -169,7 +199,7 @@ def _build_ace_branch(sd, input_size, input_channel):
     net = N.myNet("cpu", "cifar10", n_class=10, input_size=input_size,
                   input_channel=input_channel, conv_widths=[2, 2, 8],
                   kernel_sizes=[3, 4, 4], strides=[1, 2, 2], linear_sizes=[250])
-    net.load_state_dict(sd, strict=False)
+    _load_with_numel_fix(net, sd)   # normalization (1,3,1,1) vs (3,1,1) needs the view
     return net
 
 
@@ -201,7 +231,7 @@ def mode_label_quality(samples=2000, eps=0.00784313725):
                                              input_size, input_channel, n_class)
     br = torch.load(os.path.join(CONVERTED, "ibp_2_255_branch.pt"), map_location="cpu")
     exit_idx = dTNet.exit_ids[1]   # the single branch exit
-    dTNet.branch_nets[exit_idx].load_state_dict(br, strict=False)
+    _load_with_numel_fix(dTNet.branch_nets[exit_idx], br)
     cnet = dTNet.branch_cnets[exit_idx]
     cnet.eval()
 

@@ -27,6 +27,11 @@
 #       --branch ../converted/sabr_2_255_branch.pt \
 #       --gate-type entropy --eps 0.00784313725
 #
+#   # Fast crash test (2 epochs, 50 batches/epoch) — numbers meaningless, exit code matters
+#   sbatch --job-name=smoke_ent train_selector.slurm \
+#       --branch ../converted/ibp_2_255_branch.pt \
+#       --gate-type entropy --eps 0.00784313725 --smoke
+#
 # ! --branch MUST be a BARE net state dict (keys `blocks.layers.*`), i.e. the
 #   *_branch.pt file from convert_format.py. Passing the whole-dTNet checkpoint
 #   (keys `branchNet_0.*`) loads ZERO weights silently (load_net_state uses
@@ -43,6 +48,7 @@ python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.
 
 # --- defaults ---
 BRANCH=""                   # required: converted branch checkpoint (ACE format)
+GATE_MODEL=""                # optional: separate checkpoint for gate init (default: $BRANCH)
 GATE_TYPE="net"             # net | entropy
 EPS="0.00784313725"         # 2/255; use 0.03137254901 for 8/255
 BRANCH_NETS="C3_cifar10"
@@ -50,21 +56,35 @@ GATE_NETS="C3_cifar10"      # only used for gate-type=net
 EXP_ID="1"
 EXP_NAME="dev"          # descriptive label -> models_new/cifar10/<exp_name>/...
 COTRAIN_ENTROPY="0.5"       # entropy joint-training weight (ACE default suggestion)
+EPOCHS="200"
+MIX_EPOCHS="100"
+ANNEAL_EPOCHS="100"
+TEST_FREQ="40"
+SMOKE="0"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --branch) BRANCH="$2"; shift 2 ;;
+        --gate-model) GATE_MODEL="$2"; shift 2 ;;
         --gate-type) GATE_TYPE="$2"; shift 2 ;;
         --eps) EPS="$2"; shift 2 ;;
         --branch-nets) BRANCH_NETS="$2"; shift 2 ;;
         --gate-nets) GATE_NETS="$2"; shift 2 ;;
         --exp-id) EXP_ID="$2"; shift 2 ;;
         --exp-name) EXP_NAME="$2"; shift 2 ;;
+        --epochs) EPOCHS="$2"; shift 2 ;;
+        --smoke) SMOKE="1"; shift 1 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "$BRANCH" ]]; then echo "Error: --branch required"; exit 1; fi
+
+if [[ "$SMOKE" == "1" ]]; then
+    EPOCHS="2"; MIX_EPOCHS="1"; ANNEAL_EPOCHS="1"; TEST_FREQ="1"
+    echo "=== SMOKE MODE: 2 epochs, fast kappa/eps ramp, --debug (50 batches per pass) ==="
+    echo "=== crash test only — the resulting accuracies/certs are MEANINGLESS ==="
+fi
 
 # --- guard: reject whole-dTNet checkpoints (they load as 0 keys, silently) ---
 python - "$BRANCH" << 'EOF'
@@ -95,16 +115,20 @@ CMD=(python deepTrunk_main.py \
     --train-att-n-steps 8 --train-att-step-size 0.25 \
     --test-att-n-steps 40 --test-att-step-size 0.035 \
     --opt adam --lr 1e-3 --lr-step 10 --lr-factor 0.5 \
-    --mix --mix-epochs 100 --anneal --anneal-epochs 100 --n-epochs 200 \
+    --mix --mix-epochs "$MIX_EPOCHS" --anneal --anneal-epochs "$ANNEAL_EPOCHS" --n-epochs "$EPOCHS" \
     --l1-reg 1e-5 --train-domain box --nat-factor 0.5 \
     --train-trunk False --gate-on-trunk False \
     --retrain-branch False \
     --balanced-gate-loss --sliding-loss-balance 1.0 \
     --cert --cert-domain box \
-    --test-freq 40 --test-set test)
+    --test-freq "$TEST_FREQ" --test-set test)
+
+if [[ "$SMOKE" == "1" ]]; then
+    CMD+=(--debug)
+fi
 
 if [[ "$GATE_TYPE" == "net" ]]; then
-    CMD+=(--gate-nets "$GATE_NETS" --gate-mode gate_init --load-gate-model "$BRANCH")
+    CMD+=(--gate-nets "$GATE_NETS" --gate-mode gate_init --load-gate-model "${GATE_MODEL:-$BRANCH}")
 else
     CMD+=(--gate-threshold -0.4 --cotrain-entropy "$COTRAIN_ENTROPY")
 fi

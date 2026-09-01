@@ -106,6 +106,21 @@ def latest_ckpt(run_dir):
     return nets[-1]
 
 
+def load_with_numel_fix(model, sd):
+    """Mirror ACE's load_net_state: direct strict=False load, falling back to a
+    numel-matching view for shape differences (normalization saved as (1,3,1,1),
+    scalar gate-head bias vs (1), etc.). Returns (missing, unexpected).
+    """
+    try:
+        return model.load_state_dict(sd, strict=False)
+    except RuntimeError:
+        sdn = model.state_dict()
+        for k, v in sd.items():
+            if k in sdn and v.numel() == sdn[k].numel():
+                sdn[k] = v.view(sdn[k].shape)
+        return model.load_state_dict(sdn, strict=False)
+
+
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
@@ -145,7 +160,7 @@ def main():
     dTNet = MyDeepTrunkNet.get_deepTrunk_net(args_cfg, device, lossFn, evalFn,
                                             input_size, input_channel, n_class)
     sd = torch.load(ckpt_path, map_location=device)
-    missing, unexpected = dTNet.load_state_dict(sd, strict=False)
+    missing, unexpected = load_with_numel_fix(dTNet, sd)
     miss_gb = [k for k in missing if "gate" in k or "branch" in k]
     print(f"load: {len(missing)} missing ({len(miss_gb)} gate/branch), "
           f"{len(unexpected)} unexpected")
@@ -246,7 +261,10 @@ def main():
     hw = sd_g["blocks.layers.10.weight"]
     hb = sd_g["blocks.layers.10.bias"]
     print(f"  --- gate head (final linear) ---")
-    print(f"    weight mean|.|={hw.abs().mean().item():.4f}  bias mean={hb.mean().item():.4f}  bias std={hb.std().item():.4f}")
+    if hb.numel() > 1:
+        print(f"    weight mean|.|={hw.abs().mean().item():.4f}  bias mean={hb.mean().item():.4f}  bias std={hb.std().item():.4f}")
+    else:
+        print(f"    weight mean|.|={hw.abs().mean().item():.4f}  bias={hb.item():.4f} (single unit)")
 
 
 if __name__ == "__main__":
