@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Analyze WHY a trained ACE gate certifies (or not) at tau=0.
+"""Diagnose why a trained ACE gate certifies (or not) at tau=0.
 
-The v3 training logs are gone (1-day log hygiene), but the trained checkpoints
-(net_*.pt) survive. This script loads a saved dTNet checkpoint, runs the SAME
-box verification the eval uses, and reports the gate margin structure:
+A trained dTNet checkpoint (net_*.pt) contains both the gate and the branch.
+This script loads one and runs the same box verification that the evaluation
+pipeline uses, reporting the gate margin structure:
 
   provable routing  = P( lb(gate) > tau )          <- what cert needs
   provable reject   = P( ub(gate) < tau )
@@ -11,14 +11,14 @@ box verification the eval uses, and reports the gate margin structure:
   branch ver        = P( branch verifies )         <- the cert targets' rate
   cert              = P( lb > tau  AND  branch verifies )
 
-Comparing our gate (ibp_2_255_v3) vs the smoke control (sel_smoke_v3) vs the
-released selector (C3_ACE_Net_IBP_cert_cifar10_2_255.pt) disambiguates:
+Running it on checkpoints whose gates were trained on different branches (e.g. a
+custom branch vs the released one) localises the composition bottleneck:
   - low 'provable routing'          -> margin/coverage failure (gate can't prove routing)
   - high routing but low cert       -> alignment failure (routes samples that don't verify)
 
 Usage (HPC, from ~/research/ACE with the 'ace' conda env):
   python ~/research/scripts/analyze_gate_margins.py \
-      --run-dir models_new/cifar10/ibp_2_255_v3/121/None_0.00784/<ts> [--samples 2000]
+      --run-dir models_new/cifar10/<exp>/<id>/None_0.00784/<ts> [--samples 2000]
 
   --run-dir   a timestamped run dir containing args.json + net_*.pt (latest used)
   --ckpt      alternatively: path to a single net_*.pt / whole-model checkpoint
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # fall back to a local copy if present
 sys.path.insert(0, os.getcwd())
 
-from args_factory import get_args          # noqa: E402
+from args_factory import get_args, translate_net_name   # noqa: E402
 from loaders import get_loaders            # noqa: E402
 from deepTrunk_networks import MyDeepTrunkNet  # noqa: E402
 
@@ -59,8 +59,10 @@ def build_args(run_dir, fallback=None):
     args.net = "None"
     args.n_branches = 1
     args.gate_type = "net"
-    args.branch_nets = ["C3_cifar10"]
-    args.gate_nets = ["C3_cifar10"]
+    # get_network() only knows serialized myNet names, not "C3_cifar10"
+    _c3 = translate_net_name("C3_cifar10")
+    args.branch_nets = [_c3]
+    args.gate_nets = [_c3]
     args.gate_threshold = 0.0
     args.test_eps = 0.00784313725
     args.train_eps = 0.00784313725
@@ -154,7 +156,7 @@ def main():
     branch_cnet = dTNet.branch_cnets[exit_idx]
     domain = "box"
 
-    lb_all, ub_all, ver_all, branch_ok_all, gate_nat_all, branch_nat_all = [], [], [], [], [], []
+    lb_all, ub_all, ver_all, branch_ok_all, gate_nat_all, branch_nat_all, margin_list = [], [], [], [], [], [], []
     n_seen = 0
     for inputs, targets in test_loader:
         if n_seen >= args.samples:
@@ -169,7 +171,7 @@ def main():
         _, lb, _ = gate_cnet.get_abs_loss(inputs, ones, eps, domain, tau, beta=1)
         _, ub, _ = gate_cnet.get_abs_loss(inputs, zeros, eps, domain, tau, beta=1)
         # branch verification (true label)
-        ver, _, _ = branch_cnet.get_abs_loss(inputs, targets, eps, domain, 0, beta=1)
+        ver, margin_n, _ = branch_cnet.get_abs_loss(inputs, targets, eps, domain, 0, beta=1)
 
         gate_logits = dTNet.gate_nets[exit_idx].forward(inputs)          # (B,1)
         branch_logits = dTNet.branch_nets[exit_idx].forward(inputs)      # (B,10)
@@ -177,6 +179,7 @@ def main():
         lb_all.append(lb.cpu().float())
         ub_all.append(ub.cpu().float())
         ver_all.append(ver.cpu().float())
+        margin_list.append(margin_n.cpu().float())
         branch_ok_all.append(targets.eq(branch_logits.argmax(1)).cpu().float())
         gate_nat_all.append((gate_logits.squeeze(1) > tau).cpu().float())
         branch_nat_all.append(targets.eq(branch_logits.argmax(1)).cpu().float())
@@ -228,6 +231,22 @@ def main():
     for k, v in sd_b.items():
         if k.endswith(".weight") and "conv" not in k and "linear" not in k:
             print(f"    {k:24s} {str(tuple(v.shape)):18s} {v.abs().mean().item():.5f} / {v.abs().max().item():.5f}")
+
+    # branch cert-margin fragility: how many positives/negatives sit near margin 0
+    margin_all = torch.cat(margin_list)[: args.samples]
+    pos = margin_all > 0
+    frac_fragile_pos = ((margin_all > 0) & (margin_all <= 0.05)).float().mean().item()
+    frac_fragile_neg = ((margin_all > -0.05) & (margin_all <= 0)).float().mean().item()
+    print(f"  --- branch cert margins ---")
+    print(f"    margin quantiles 10/50/90          : {pct(margin_all, .1):.4f} / {pct(margin_all, .5):.4f} / {pct(margin_all, .9):.4f}")
+    print(f"    fragile positives (0 < m <= .05)   : {frac_fragile_pos:.4f}   fragile negatives (-.05 < m <= 0): {frac_fragile_neg:.4f}")
+
+    # gate head: the fitted operating point lives in the last linear's bias
+    sd_g = dTNet.gate_nets[exit_idx].state_dict()
+    hw = sd_g["blocks.layers.10.weight"]
+    hb = sd_g["blocks.layers.10.bias"]
+    print(f"  --- gate head (final linear) ---")
+    print(f"    weight mean|.|={hw.abs().mean().item():.4f}  bias mean={hb.mean().item():.4f}  bias std={hb.std().item():.4f}")
 
 
 if __name__ == "__main__":
