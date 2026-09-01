@@ -19,7 +19,9 @@ EPS_2="0.00784313725"   # 2/255
 EPS_8="0.03137254901"   # 8/255
 
 # Tau grids
-TAU_SEL="0.0,0.3,0.5,0.7,0.9"
+# Certifiable selection needs lb(gate) >= tau, so NEGATIVE tau is the easier direction
+# (runbook, 31 Aug). Positive-only grid is strictly harder than tau=0 and only reduces routing.
+TAU_SEL="-0.9,-0.5,-0.2,0.0,0.3,0.5"
 TAU_ENT="-0.1,-0.3,-0.5,-0.7,-0.9"
 
 # ACE architecture

@@ -40,9 +40,15 @@ def read_summary(cert_log_path):
     """Extract per-sample flags from a cert_log.csv and return summary numbers."""
     with open(cert_log_path, "r") as f:
         reader = csv.reader(f, delimiter=";")
-        header = next(reader)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return None  # empty cert_log.csv (crashed/partial run)
         header = [h.strip('"').strip() for h in header]
         rows = list(reader)
+
+    if not header:
+        return None
 
     # drop the trailing "total" summary row (nat_ok is a fraction there, not a flag)
     rows = [r for r in rows if not (r and r[0].strip().lower() in ("total",))]
@@ -142,8 +148,11 @@ def main():
         if version_filter and not meta["exp_name"].endswith(f"_{version_filter}"):
             continue
 
-        summary = read_summary(os.path.join(root, "cert_log.csv"))
+        cert_log_path = os.path.join(root, "cert_log.csv")
+        summary = read_summary(cert_log_path)
         if summary is None:
+            print(f"  [warn] skipping {root}: cert_log.csv empty or no usable data",
+                  file=sys.stderr)
             continue
         row = {
             "run_dir": meta["run_dir"],
