@@ -11,10 +11,9 @@
 #   labels       alpha-CROWN labels for the branch (selector targets)
 #   selector     train the selection mechanism on those labels
 #   roc          gate ROC figure from the trained selector
-#   labels_eval      gate + branch verification (IBP / CROWN / alpha-CROWN)
 #   eval         evaluate the composition (box / alpha-CROWN)
 #   aggregate    collect cert_log.csv into results/agg_<ver>.csv
-#   all          run the branch pipeline end to end (train -> ... -> aggregate)
+#   all          run every stage for the target
 #   status       show what each stage has produced
 #
 # Targets:  ibp | sabr | mtl-ibp | crown-ibp | all
@@ -32,8 +31,7 @@
 #   --in-gate-model VER  version tag of the gate model (default: --in_ver)
 #   --sel | --ent        selector type (default --sel)
 #   --eps SET            2_255 | 8_255 | both (default both)
-#   --verify MODE        box | alpha | all (default box)
-#   --tau VALUE          override the gate-threshold grid (e.g. --tau 0.0)
+#   --verify MODE        box | alpha | alpha-gate | all (default box)
 #   --kind MODE          aggregate: all | eval | train (default all)
 #   --trunk-model PATH   explicit trunk override
 #   --wait               block between stages until squeue drains
@@ -63,7 +61,6 @@ GATE="sel"
 EPS_SET="both"
 VERIFY="box"
 KIND="all"
-TAU_OVERRIDE=""
 TRUNK_OVERRIDE=""
 DRY=0
 WAIT=0
@@ -78,7 +75,6 @@ while [[ $# -gt 0 ]]; do
         --ent)            GATE="ent"; shift ;;
         --eps)            EPS_SET="$2"; shift 2 ;;
         --verify)         VERIFY="$2"; shift 2 ;;
-        --tau)            TAU_OVERRIDE="$2"; shift 2 ;;
         --kind)           KIND="$2"; shift 2 ;;
         --trunk-model)    TRUNK_OVERRIDE="$2"; shift 2 ;;
         --wait)           WAIT=1; shift ;;
@@ -164,10 +160,10 @@ stage_labels() {
     echo "== labels ($VER, in=$IN_VER) target=$TARGET =="
     for m in $(methods "$TARGET"); do
         for e in $(eps_set "$EPS_SET"); do
-            local ck; ck="$(ctrain_in "$m" "$e" "$IN_VER")"
-            [[ -z "$ck" ]] && { echo "  skip labels $m $e: no CTRAIN model for in=$IN_VER"; continue; }
+            local br; br="$(branch_in "$m" "$e" "$IN_VER")"
+            [[ -z "$br" ]] && { echo "  skip labels $m $e: no branch for in=$IN_VER"; continue; }
             run "labels_${m}_${e}_${VER}" gen_labels.slurm \
-                --ckpt "$ck" \
+                --ckpt "$br" \
                 --eps "$(eps_of "$e")" \
                 --output "$(label_csv "$m" "$e" "$VER")"
         done
@@ -205,22 +201,6 @@ stage_roc() {
     done
 }
 
-stage_labels_eval() {
-    echo "== labels_eval ($VER, in=$IN_VER) target=$TARGET =="
-    for m in $(methods "$TARGET"); do
-        for e in $(eps_set "$EPS_SET"); do
-            local name; name="$(sel_name "$m" "$e" "$IN_VER" "$GATE")"
-            local dir;  dir="$(find_selector "$name")"
-            [[ -z "$dir" ]] && { echo "  skip gate $m $e: no model $name"; continue; }
-            mkdir -p "$RESULTS_DIR/dumps"
-            run "labels_eval_${m}_${e}_${VER}" gen_labels_eval.slurm \
-                --run-dir "$dir" --eps "$(eps_of "$e")" \
-                --samples 10000 \
-                --dump-npz "$RESULTS_DIR/dumps/labels_eval_${m}_${e}_${IN_VER}.npz"
-        done
-    done
-}
-
 stage_eval() {
     echo "== eval ($VER, in=$IN_VER, verify=$VERIFY) target=$TARGET gate-model=${GATE_MODEL:-<same>} =="
     for m in $(methods "$TARGET"); do
@@ -228,33 +208,19 @@ stage_eval() {
             local name; name="$(sel_name "$m" "$e" "$IN_VER" "$GATE")"
             local dir;  dir="$(find_selector "$name")"
             [[ -z "$dir" ]] && { echo "  skip eval $m $e: no model $name"; continue; }
+            local model; model="$(latest_net "$dir")"
             local trunk; trunk="${TRUNK_OVERRIDE:-$(trunk_for "$e")}"
-            # ACE box cert: nat / pgd / cert_box (the verifier the released numbers use)
-            if [[ "$VERIFY" == box || "$VERIFY" == all ]]; then
-                local model; model="$(latest_net "$dir")"
-                run "eval_${m}_${e}_box_${VER}" eval_ace.slurm \
+            for dom in $(verify_domains "$VERIFY"); do
+                run "eval_${m}_${e}_${dom}_${VER}" eval_ace.slurm \
                     --load-model "$model" \
                     --load-trunk-model "$trunk" \
                     --gate-type "$( [[ "$GATE" == ent ]] && echo entropy || echo net )" \
-                    --gate-threshold "${TAU_OVERRIDE:-$(tau_grid "$GATE")}" \
-                    --cert-domain box \
+                    --gate-threshold "$(tau_grid "$GATE")" \
+                    --cert-domain "$dom" \
                     --eps "$(eps_of "$e")" \
                     --exp-id "$(eval_id "$m" "$e" "$GATE")" \
                     --exp-name "$(eval_name "$m" "$e" "$GATE" "$VER")"
-            fi
-            # alpha-CROWN: combine the standalone gate+branch labels (from the labels_eval stage).
-            # ACE's own l_alpha is a no-op (alpha optimizer finds no params), so we do not use it.
-            if [[ "$VERIFY" == alpha || "$VERIFY" == all ]]; then
-                local npz="$RESULTS_DIR/dumps/labels_eval_${m}_${e}_${IN_VER}.npz"
-                if [[ -f "$npz" ]]; then
-                    local taus=()
-                    [[ -n "$TAU_OVERRIDE" ]] && taus=(--taus "$TAU_OVERRIDE")
-                    py "$SCRIPT_DIR/combine_labels_eval.py" --npz "$npz" "${taus[@]}" \
-                        --out "$RESULTS_DIR/labels_eval_${m}_${e}_${IN_VER}.csv"
-                else
-                    echo "  skip alpha $m $e: no $npz (run: bash pipeline.sh labels_eval $TARGET --in_ver $IN_VER)"
-                fi
-            fi
+            done
         done
     done
 }
@@ -278,10 +244,9 @@ case "$STAGE" in
     labels)     stage_labels ;;
     selector)   stage_selector ;;
     roc)        stage_roc ;;
-    labels_eval)    stage_labels_eval ;;
     eval)       stage_eval ;;
     aggregate)  stage_aggregate ;;
-    all)        stage_train; wait_jobs; stage_convert; wait_jobs; stage_labels; wait_jobs; stage_selector; wait_jobs; stage_roc; stage_eval; wait_jobs; stage_aggregate ;;
+    all)        stage_train_core; wait_jobs; stage_train; wait_jobs; stage_convert; wait_jobs; stage_labels; wait_jobs; stage_selector; wait_jobs; stage_roc; stage_eval ;;
     status)     bash "$SCRIPT_DIR/pipeline_status.sh" "$VER" ;;
     help|*)     sed -n '2,46p' "$0" ;;
 esac

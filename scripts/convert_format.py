@@ -71,22 +71,25 @@ def swap_branch(tpl, sd, branch):
     return n
 
 
-def convert_one(method, eps, eps_sfx):
+def convert_one(method, eps, eps_sfx, runs_dir=None, out_branch=None):
     branch = "branchNet_0"
     tpl = torch.load(TEMPLATES[eps_sfx], map_location="cpu")
-    p = os.path.join(RUNS, f"{method}_eps{eps:.8f}", "final_model_state.pt")
+    runs_dir = runs_dir or os.path.join(RUNS, f"{method}_eps{eps:.8f}")
+    p = os.path.join(runs_dir, "final_model_state.pt")
     assert os.path.exists(p), f"missing plain model: {p}"
     n = swap_branch(tpl, torch.load(p, map_location="cpu"), branch)
 
-    os.makedirs(OUT, exist_ok=True)
-    out = os.path.join(OUT, f"{method}_{eps_sfx}.pt")
+    if out_branch is None:
+        os.makedirs(OUT, exist_ok=True)
+        out_branch = os.path.join(OUT, f"{method}_{eps_sfx}_branch.pt")
+    os.makedirs(os.path.dirname(os.path.abspath(out_branch)), exist_ok=True)
+    out = out_branch[:-len("_branch.pt")] + ".pt" if out_branch.endswith("_branch.pt") else out_branch + ".pt"
     torch.save(tpl, out)
 
     # bare branch state dict for --load-branch-model / --load-gate-model
     prefix = branch + "."
     bare = {k[len(prefix):]: v for k, v in tpl.items() if k.startswith(prefix)}
     assert bare, f"no {prefix}* keys in template"
-    out_branch = os.path.join(OUT, f"{method}_{eps_sfx}_branch.pt")
     torch.save(bare, out_branch)
 
     # sanity: first conv layer of branch matches source
@@ -101,6 +104,10 @@ def main():
     ap.add_argument("--method", choices={m for m, _, _ in MATRIX})
     ap.add_argument("--eps", type=float, help="train eps (raw)")
     ap.add_argument("--all", action="store_true", help="convert whole matrix")
+    ap.add_argument("--runs-dir", default=None,
+                    help="dir with final_model_state.pt (default: runs/<method>_eps<eps>.8f)")
+    ap.add_argument("--output", default=None,
+                    help="bare branch output path (default: converted/<method>_<eps>_branch.pt)")
     args = ap.parse_args()
 
     if args.all:
@@ -110,7 +117,7 @@ def main():
         assert args.method and args.eps is not None, "pass --method + --eps, or --all"
         matches = [r for r in MATRIX if r[0] == args.method and r[1] == args.eps]
         assert matches, f"no matrix row for {args.method} {args.eps}"
-        convert_one(*matches[0])
+        convert_one(*matches[0], runs_dir=args.runs_dir, out_branch=args.output)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 #!/usr/bin/zsh
 #SBATCH --job-name=train_selector
-#SBATCH --partition=c23g
-#SBATCH --account=thes2354
+# account + partition come from config.sh via pipeline.sh. For a direct "sbatch <file>", pass --account/--partition.
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -26,6 +25,11 @@
 #   sbatch --job-name=sel_sabr2_ent train_selector.slurm \
 #       --branch ../converted/sabr_2_255_branch.pt \
 #       --gate-type entropy --eps 0.00784313725
+#
+#   # SelectionNet gate trained on alpha-CROWN labels instead of box labels
+#   sbatch --job-name=sel_ibp2_alpha train_selector.slurm \
+#       --branch ../converted/ibp_2_255_branch.pt --gate-type net --eps 0.00784313725 \
+#       --gate-labels-csv ../labels/labels_alpha_crown_ibp_2_255.csv --exp-id 230 --exp-name ibp_2_255_alpha_v3
 #
 #   # Fast crash test (2 epochs, 50 batches/epoch) — numbers meaningless, exit code matters
 #   sbatch --job-name=smoke_ent train_selector.slurm \
@@ -56,6 +60,8 @@ GATE_NETS="C3_cifar10"      # only used for gate-type=net
 EXP_ID="1"
 EXP_NAME="dev"          # descriptive label -> models_new/cifar10/<exp_name>/...
 COTRAIN_ENTROPY="0.5"       # entropy joint-training weight (ACE default suggestion)
+GATE_LABELS_CSV=""          # optional: precomputed gate targets (index,label) -> alpha-CROWN
+                            # labels for gate-type=net; needs apply_gate_labels_patch.sh
 EPOCHS="200"
 MIX_EPOCHS="100"
 ANNEAL_EPOCHS="100"
@@ -72,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --gate-nets) GATE_NETS="$2"; shift 2 ;;
         --exp-id) EXP_ID="$2"; shift 2 ;;
         --exp-name) EXP_NAME="$2"; shift 2 ;;
+        --gate-labels-csv) GATE_LABELS_CSV="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
         --smoke) SMOKE="1"; shift 1 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -127,6 +134,13 @@ if [[ "$SMOKE" == "1" ]]; then
     CMD+=(--debug)
 fi
 
+if [[ -n "$GATE_LABELS_CSV" ]]; then
+    # Precomputed targets replace ACE's internal diffAI_cert y_s for the TRAIN passes.
+    # Only meaningful for gate-type=net (see apply_gate_labels_patch.sh).
+    echo "=== gate labels injected: $GATE_LABELS_CSV ==="
+    CMD+=(--gate-labels-csv "$GATE_LABELS_CSV")
+fi
+
 if [[ "$GATE_TYPE" == "net" ]]; then
     CMD+=(--gate-nets "$GATE_NETS" --gate-mode gate_init --load-gate-model "${GATE_MODEL:-$BRANCH}")
 else
@@ -134,6 +148,14 @@ else
 fi
 
 "${CMD[@]}"
+rc=$?
 
 echo ""
-echo "=== train_selector DONE ==="
+if [[ $rc -eq 0 ]]; then
+    echo "=== train_selector DONE (exit 0) ==="
+else
+    echo "=== train_selector FAILED: python exit=$rc — this run did NOT train (see the .err) ==="
+fi
+# Propagate the python status: without this, the trailing echo makes slurm report
+# COMPLETED even when deepTrunk_main.py crashed (bitten 14 Sep: 4 gates 'COMPLETED' in 88 s).
+exit $rc

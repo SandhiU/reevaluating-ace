@@ -1,7 +1,6 @@
 #!/usr/bin/zsh
 #SBATCH --job-name=eval_ace
-#SBATCH --partition=c23g
-#SBATCH --account=thes2354
+# account + partition come from config.sh via pipeline.sh. For a direct "sbatch <file>", pass --account/--partition.
 #SBATCH --time=04:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -56,7 +55,9 @@ nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 
 # --- defaults ---
-LOAD_MODEL=""               # required: branch+gate checkpoint (or full ACE model)
+LOAD_MODEL=""               # branch+gate checkpoint (or full ACE model)
+LOAD_BRANCH_MODEL=""       # bare branch net (blocks.layers.*); alternative to --load-model
+LOAD_GATE_MODEL=""         # bare gate net (blocks.layers.*); pair any gate with any branch
 TRUNK_MODEL=""              # trunk checkpoint; auto-derived from --eps if empty
 GATE_TYPE="net"             # net | entropy
 GATE_THRESHOLD=""           # required, comma-separated
@@ -72,6 +73,8 @@ EXP_NAME="dev"          # descriptive run label -> models_new/cifar10/<exp_name>
 while [[ $# -gt 0 ]]; do
     case $1 in
         --load-model) LOAD_MODEL="$2"; shift 2 ;;
+        --load-branch-model) LOAD_BRANCH_MODEL="$2"; shift 2 ;;
+        --load-gate-model) LOAD_GATE_MODEL="$2"; shift 2 ;;
         --load-trunk-model) TRUNK_MODEL="$2"; shift 2 ;;
         --gate-type) GATE_TYPE="$2"; shift 2 ;;
         --gate-threshold) GATE_THRESHOLD="$2"; shift 2 ;;
@@ -87,7 +90,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$LOAD_MODEL" ]]; then echo "Error: --load-model required"; exit 1; fi
+if [[ -z "$LOAD_MODEL" && -z "$LOAD_BRANCH_MODEL" ]]; then
+    echo "Error: pass --load-model (whole dTNet) or --load-branch-model [+ --load-gate-model] (bare nets)"; exit 1
+fi
+if [[ -z "$LOAD_MODEL" && -z "$LOAD_GATE_MODEL" ]]; then
+    echo "Error: --load-branch-model given without --load-gate-model; the gate would be uninitialised"; exit 1
+fi
 if [[ -z "$GATE_THRESHOLD" ]]; then echo "Error: --gate-threshold required"; exit 1; fi
 
 # Released ACE branch+gate checkpoints contain NO trunk (trained with --net None).
@@ -102,7 +110,23 @@ if [[ -z "$TRUNK_MODEL" ]]; then
     fi
 fi
 
-echo "=== model: $LOAD_MODEL  trunk: $TRUNK_MODEL  gate-type: $GATE_TYPE  cert-domain: $CERT_DOMAIN  eps: $EPS ==="
+echo "=== model: ${LOAD_MODEL:-<bare>}  branch: ${LOAD_BRANCH_MODEL:-<from model>}  gate: ${LOAD_GATE_MODEL:-<from model>}  trunk: $TRUNK_MODEL  gate-type: $GATE_TYPE  cert-domain: $CERT_DOMAIN  eps: $EPS ==="
+
+# Either one whole dTNet, or a pair of bare nets (which is how a gate trained for one branch can be
+# evaluated with another branch: --load-branch-model X_branch.pt --load-gate-model Y_gate.pt).
+MODELARGS=()
+if [[ -n "$LOAD_MODEL" ]]; then
+    MODELARGS+=(--load-model "$LOAD_MODEL")
+else
+    MODELARGS+=(--load-branch-model "$LOAD_BRANCH_MODEL" --load-gate-model "$LOAD_GATE_MODEL")
+fi
+
+# alpha-CROWN needs the optimizer on; enable it for both gate and branch cnets.
+if [[ "$CERT_DOMAIN" == l_alpha* ]]; then
+    export ALPHA_OPT=1
+    export ALPHA_OPT_STEPS="${ALPHA_OPT_STEPS:-100}"
+    echo "  alpha-CROWN: ALPHA_OPT=1 opt_steps=$ALPHA_OPT_STEPS"
+fi
 
 for TAU in ${(s:,:)GATE_THRESHOLD}; do
     echo ""
@@ -114,7 +138,7 @@ for TAU in ${(s:,:)GATE_THRESHOLD}; do
         --net "$NET" \
         --branch-nets "$BRANCH_NETS" \
         --load-trunk-model "$TRUNK_MODEL" \
-        --load-model "$LOAD_MODEL" \
+        "${MODELARGS[@]}" \
         --n-branches 1 \
         --gate-type "$GATE_TYPE" \
         --gate-threshold "$TAU" \

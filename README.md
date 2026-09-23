@@ -1,6 +1,6 @@
 # Re-evaluating ACE
 
-Thesis project: re-evaluate ACE (Certify or Predict, Müller et al. 2021) with modern certified training methods — SABR, MTL-IBP — instead of the original IBP/CIBP/COLT branches.
+Thesis project: re-evaluate ACE (Certify or Predict, Müller et al. 2021) with modern certified training methods (SABR, MTL-IBP) instead of the original IBP/CIBP/COLT branches.
 
 ## How ACE works
 
@@ -8,23 +8,25 @@ An ACE model has three parts:
 
 | Part | Role | Who provides it |
 |---|---|---|
-| **Trunk** | Accurate network (EfficientNet-B0), not provably robust | ACE's released checkpoint, frozen |
+| **Trunk** | Accurate network (EfficientNet-B0), not provably robust | We train it (`train_core`) |
 | **Branch** | Certifiably robust network (myNet C3) | We train these with CTRAIN |
-| **Selector** | Routes each input to trunk or branch | Trained by ACE's own code |
+| **Selector** | Routes each input to trunk or branch | We train it on alpha-CROWN labels |
 
 The selector decides per input: if the branch can certify it, use the branch; otherwise fall back to the trunk. Two selector types exist: **SelectionNet** (a small network) and **Entropy** (route when the branch's output entropy is low).
 
-## Pipeline (CTRAIN to ACE)
+## Pipeline
 
 ```
-1. train_cert_net.py         train a branch with CTRAIN        -> runs/<method>_eps<eps>/
-2. convert_format.py         CTRAIN checkpoint -> ACE format   -> converted/
-3. train_selector.slurm      ACE's selector training           -> ACE/models_new/...
-4. eval_ace.slurm            ACE's evaluation, sweep τ         -> cert_log.csv per run
-5. aggregate_ace_results.py  collect results into a table      -> results/agg_<ver>.csv
+  train_core   trunk, PGD adv training (EfficientNet-B0)     -> ACE/models_new/.../core_adv_*
+  train        branch with CTRAIN, then convert to ACE fmt   -> runs/ then converted/
+  labels       alpha-CROWN labels for the branch             -> labels/
+  selector     gate trained on those labels                  -> ACE/models_new/...
+  roc          gate ROC figure                               -> figures/
+  eval         composition eval, sweep tau                   -> cert_log.csv per run
+  aggregate    collect cert_log.csv into one CSV             -> results/agg_<ver>.csv
 ```
 
-**ACE already implements selector training and evaluation** (steps 3-4). Use the pipeline scripts above to run all models at once.
+Everything is driven by `pipeline.sh`. Conversion runs automatically at the end of `train`.
 
 ## Setup
 
@@ -34,99 +36,65 @@ conda activate ace
 pip install CTRAIN
 pip install git+https://github.com/Verified-Intelligence/auto_LiRPA.git
 pip install -r requirements.txt
-bash apply_patches.sh    # fixes third-party packages (e.g. robustness)
+bash apply_patches.sh    # fixes third-party packages (e.g. robustness) and ACE
 ```
 
-Two current dependency issues: CTRAIN needs `scikit-learn==1.8` (smac incompatibility), and `apply_patches.sh` fixes three third-party bugs:
-1. `robustness` — `torchvision.models.utils` removed in newer torchvision
-2. ACE `utils.py` — `load_net_state` shape-compare bug that breaks gate loading during selector training
-3. ACE `relaxed_networks.py` — missing `n_class` on `CombinedNetwork` that breaks entropy-gate evaluation
+Two dependency notes: CTRAIN needs `scikit-learn==1.8` (smac incompatibility), and `apply_patches.sh` fixes the third-party and ACE bugs we hit (robustness import, ACE gate loading, ACE `n_class`, ACE `kappa` kwarg).
 
-## Quick start — pipeline scripts
-
-Instead of constructing `sbatch` commands manually, use the convenience scripts in `scripts/`. They call the slurm files with correct parameters pre-set for all models.
+## Running the pipeline
 
 ```bash
-# Run the full pipeline (pauses between stages)
-bash pipeline.sh all v1
+bash pipeline.sh <stage> <target> [flags]
 
-# Or run stages individually:
-bash pipeline.sh train v1              # Stage 1: train cert networks
-bash pipeline.sh convert               # Stage 2: convert to ACE format
-bash pipeline.sh selector v1 --sel     # Stage 3: SelNet only
-bash pipeline.sh selector v1 --ent     # Stage 3: Entropy only
-bash pipeline.sh eval v1 --both        # Stage 4: evaluate everything
+# targets: ibp | sabr | mtl-ibp | crown-ibp | all
+# flags:   --ver VER  --in_ver VER  --gate-model METHOD  --in-gate-model VER
+#          --sel | --ent   --eps 2_255|8_255|both
+#          --verify box|alpha|alpha-gate|all   --trunk-model PATH   --dry-run
 
-# Check what's done:
-bash pipeline.sh status eval_v1
+bash pipeline.sh train_core --eps 8_255 --ver v5            # trunk
+bash pipeline.sh train sabr --ver v5 --sel                  # branch (+ convert)
+bash pipeline.sh labels all --ver v5                        # alpha-CROWN labels
+bash pipeline.sh selector all --ver v5 --sel                # gates
+bash pipeline.sh roc all --ver v5 --sel                     # ROC figures
+bash pipeline.sh eval all --in_ver v5 --ver v5 --sel        # compositions
+bash pipeline.sh aggregate --in_ver v5                      # CSV of all eval runs
 
-# Aggregate results into a CSV:
-bash aggregate_results.sh v1           # → results/agg_v1.csv
-bash aggregate_results.sh all          # → results/agg_all.csv
+# single model, or a cross-gate pairing:
+bash pipeline.sh train sabr --ver v5 --eps 2_255 --sel
+bash pipeline.sh eval mtl-ibp --gate-model ibp --in_ver v5 --in-gate-model v5 --ver v5 --sel
+
+# whole pipeline in one go (submit everything, then walk away):
+bash pipeline.sh all ibp --ver test-22-09-2026-01 --in_ver v5
+bash pipeline.sh all all --ver v5
+
+bash pipeline.sh status v5
 ```
 
-Stage 3 accepts a custom converted directory if you're reusing branches from a previous run:
-```bash
-bash 03_train_selector_all.sh v1 --both ~/research/converted
-```
+The version tag is any string, and it flows through every stage. Each stage reads `--in_ver` and writes `--ver`, so a full run with one tag is self-consistent, and a rerun can mix in an older version for any input.
 
-See `00_config.sh` for all shared paths and hyperparameters.
-
-## Project structure
+## Layout
 
 ```
 research/
-├── ACE/                # ACE codebase (clone; not tracked in git)
-├── data/               # CIFAR-10: cifar-10-batches-py + cifar-10-python.tar.gz
-│                       # (tar tracked in git; extracted batches gitignored)
-├── scripts/            # our scripts (this repo's content)
-├── runs/               # trained branches (gitignored)
-├── converted/          # branches in ACE format (gitignored)
-├── results/            # aggregated results
-├── requirements.txt
-├── apply_patches.sh
-└── README.md
+├── ACE/            ACE codebase (clone; not tracked)
+├── data/           CIFAR-10
+├── scripts/        our scripts (this file lives in code/)
+├── runs/           CTRAIN branch outputs          runs/<method>_<eps>_<ver>/
+├── converted/      branches in ACE format         converted/<method>_<eps>_<ver>_branch.pt
+├── labels/         alpha-CROWN selector targets   labels/labels_alpha_crown_<method>_<eps>_<ver>.csv
+├── figures/        ROC and other figures
+└── results/        aggregated results
 ```
 
-### 1. Train a branch
+`00_config.sh` holds all shared paths, the epsilon values, the tau grids, the trunks, and `branch_hp()` (the branch hyperparameters). It also carries the exp-id scheme and the model-discovery helpers used by the pipeline.
 
-```bash
-sbatch --job-name=crown_2 train_cert_net.slurm \
-    --method crown_ibp --eps 0.00784313725 --epochs 160 --lr-milestones 120,140
-```
+## Verification
 
-Methods: `ibp`, `sabr`, `mtl_ibp`, `crown_ibp`. Eps: `0.00784313725` (2/255) or `0.03137254901` (8/255).
+`eval --verify` selects what the composition is certified with:
 
-### 2. Convert to ACE format
+- `box` (default): ACE's box verifier, used by the released models and our box numbers.
+- `alpha`: alpha-CROWN. In ACE the same domain is passed to the gate and the branch, so this certifies both with alpha-CROWN. Needs the alpha domain in ACE (`relaxed_networks.py`); see `apply_patches.sh`.
+- `alpha-gate`: same wiring as `alpha` (alpha-CROWN on the gate as well), kept for clarity in the sweep.
+- `all`: runs box and alpha.
 
-```bash
-python convert_format.py --all
-```
-
-### 3. Train the selector (uses ACE's code)
-
-```bash
-sbatch train_selector.slurm --branch ../converted/sabr_2_255.pt \
-    --gate-type net --eps 0.00784313725
-```
-
-`--gate-type entropy` for the entropy selector.
-
-### 4. Evaluate (τ sweep)
-
-```bash
-sbatch eval_ace.slurm \
-    --load-model <ACE model from step 3> \
-    --gate-type net --gate-threshold 0.0,0.3,0.5,0.7,0.9 \
-    --eps 0.00784313725
-```
-
-Two things that must match the model: `--gate-type` (`net`/`entropy`) and `--cert-domain` (`box` for IBP-style branches, `zono` for COLT). Entropy thresholds are negative (`-0.4` means "route if entropy ≤ 0.4").
-
-### 5. Collect results
-
-```bash
-python aggregate_ace_results.py \
-    --results-dir ~/research/ACE/models_new \
-    --output ~/research/results/all_results.csv
-```
+Certified accuracy is a lower bound, so alpha-CROWN must be at least as high as box on the same functional. Our label path and ACE's box use the same C-matrix functional (`gen_labels.py --ace-spec`), which is what makes that monotonicity hold.

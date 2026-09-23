@@ -38,6 +38,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # running from inside ~/research/ACE, the ACE modules are importable as-is;
 # fall back to a local copy if present
 sys.path.insert(0, os.getcwd())
+# 17 Sep: slurm jobs run from scripts/, where getcwd() is useless -> import
+# args_factory from the ACE tree explicitly (ACE_DIR env wins if set).
+_ace_dir = os.path.expanduser(os.environ.get("ACE_DIR") or "~/research/ACE")
+if os.path.isdir(_ace_dir):
+    sys.path.insert(0, _ace_dir)
 
 from args_factory import get_args, translate_net_name   # noqa: E402
 from loaders import get_loaders            # noqa: E402
@@ -128,7 +133,19 @@ def main():
     ap.add_argument("--ckpt", default=None, help="explicit checkpoint path (whole-dTNet state dict)")
     ap.add_argument("--samples", type=int, default=2000)
     ap.add_argument("--tau", type=float, default=None, help="override gate threshold")
+    ap.add_argument("--gate-domain", default="box",
+                    choices=["box", "hbox", "zono", "l_IBP", "l_CROWN", "l_CROWN-IBP"],
+                    help="verifier for the GATE's certified margins (provable routing). "
+                         "Default box = what every cert number so far used. l_CROWN / "
+                         "l_CROWN-IBP go through ACE's auto_LiRPA path and give tighter "
+                         "gate bounds, i.e. MORE provable routing at the same tau, which is "
+                         "the binding constraint at high nat (18 Sep). The branch verdict "
+                         "stays on box so the two runs are comparable sample by sample.")
     ap.add_argument("--eps", type=float, default=None, help="override test eps")
+    ap.add_argument("--dump-npz", default=None,
+                    help="save per-sample test-set arrays (idx, lb, ub, box_ver, "
+                         "gate_nat, gate_logit, branch_nat) for offline tau sweeps; "
+                         "indices are the unshuffled CIFAR-10 test positions")
     args = ap.parse_args()
 
     if args.run_dir is None and args.ckpt is None:
@@ -145,7 +162,9 @@ def main():
     if args.tau is not None:
         args_cfg.gate_threshold = args.tau
     if args.eps is not None:
-        args_cfg.test_eps = args.eps
+        # override BOTH: args.json may be missing (e.g. --run-dir pointing below the
+        # <timestamp> dir), and the default fallback would silently verify at 2/255.
+        args_cfg.test_eps = args_cfg.train_eps = args.eps
     tau = args_cfg.gate_threshold
     eps = args_cfg.test_eps
 
@@ -169,9 +188,11 @@ def main():
     exit_idx = dTNet.exit_ids[1]           # the single branch exit
     gate_cnet = dTNet.gate_cnets[exit_idx]
     branch_cnet = dTNet.branch_cnets[exit_idx]
-    domain = "box"
+    gate_domain = args.gate_domain
+    domain = "box"           # branch verdict: always box, so runs stay comparable
 
     lb_all, ub_all, ver_all, branch_ok_all, gate_nat_all, branch_nat_all, margin_list = [], [], [], [], [], [], []
+    gate_logit_all = []
     n_seen = 0
     for inputs, targets in test_loader:
         if n_seen >= args.samples:
@@ -183,8 +204,8 @@ def main():
         # gate certified bounds: y=1 -> threshold_n = lb ; y=0 -> threshold_n = ub
         ones = torch.ones_like(targets).int()
         zeros = torch.zeros_like(targets).int()
-        _, lb, _ = gate_cnet.get_abs_loss(inputs, ones, eps, domain, tau, beta=1)
-        _, ub, _ = gate_cnet.get_abs_loss(inputs, zeros, eps, domain, tau, beta=1)
+        _, lb, _ = gate_cnet.get_abs_loss(inputs, ones, eps, gate_domain, tau, beta=1)
+        _, ub, _ = gate_cnet.get_abs_loss(inputs, zeros, eps, gate_domain, tau, beta=1)
         # branch verification (true label)
         ver, margin_n, _ = branch_cnet.get_abs_loss(inputs, targets, eps, domain, 0, beta=1)
 
@@ -197,13 +218,28 @@ def main():
         margin_list.append(margin_n.cpu().float())
         branch_ok_all.append(targets.eq(branch_logits.argmax(1)).cpu().float())
         gate_nat_all.append((gate_logits.squeeze(1) > tau).cpu().float())
+        gate_logit_all.append(gate_logits.squeeze(1).cpu().float())
         branch_nat_all.append(targets.eq(branch_logits.argmax(1)).cpu().float())
 
     lb = torch.cat(lb_all)[: args.samples]
     ub = torch.cat(ub_all)[: args.samples]
     ver = torch.cat(ver_all)[: args.samples].bool()
     gate_nat = torch.cat(gate_nat_all)[: args.samples].bool()
+    gate_logit = torch.cat(gate_logit_all)[: args.samples]
     branch_nat = torch.cat(branch_nat_all)[: args.samples]
+
+    if args.dump_npz:
+        os.makedirs(os.path.dirname(os.path.abspath(args.dump_npz)) or ".", exist_ok=True)
+        np.savez(args.dump_npz,
+                 idx=np.arange(lb.numel(), dtype=np.int64),
+                 lb=lb.cpu().numpy(), ub=ub.cpu().numpy(),
+                 box_ver=ver.cpu().numpy(),
+                 gate_nat=gate_nat.cpu().numpy(),
+                 gate_logit=gate_logit.cpu().numpy(),
+                 branch_nat=branch_nat.cpu().numpy(),
+                 eps=np.float64(eps), tau=np.float64(tau), n=np.int64(lb.numel()))
+        print(f"[dump] wrote {args.dump_npz} (n={lb.numel()}, eps={eps}, tau={tau}, "
+              f"order = unshuffled test positions 0..{lb.numel()-1})")
 
     N = lb.numel()
     prov_route = (lb > tau).float().mean().item()
@@ -222,17 +258,23 @@ def main():
     def pct(x, q):
         return torch.quantile(x.float(), torch.tensor(q)).item()
 
-    print(f"\n=== {os.path.basename(run_dir)}  (n={N}, eps={eps}, tau={tau}) ===")
+    print(f"\n=== {os.path.basename(run_dir)}  (n={N}, eps={eps}, tau={tau}, "
+          f"gate_domain={gate_domain}) ===")
     print(f"  gate natural routing (logit > tau) : {gate_routing:.4f}")
     print(f"  branch nat acc                      : {branch_nat.float().mean().item():.4f}")
     print(f"  branch ver (target positive rate)   : {branch_ver:.4f}")
-    print(f"  --- certified gate margins (box, eps={eps}) ---")
+    print(f"  --- certified gate margins ({gate_domain}, eps={eps}) ---")
     print(f"  provable routing  lb>tau            : {prov_route:.4f}")
     print(f"  provable reject   ub<tau            : {prov_reject:.4f}")
     print(f"  ambiguous (can't prove either)      : {ambiguous:.4f}")
     print(f"  cert = lb>tau AND branch ver        : {cert:.4f}")
     print(f"  --- margin distribution (lb on all samples) ---")
     print(f"  lb quantiles 10/50/90               : {pct(lb, .1):.3f} / {pct(lb, .5):.3f} / {pct(lb, .9):.3f}")
+    print(f"  lb upper tail  99/99.9/max          : {pct(lb, .99):.3f} / {pct(lb, .999):.3f} / {lb.max().item():.3f}")
+    print(f"  gate logit     50/90/99/99.9/max     : {pct(gate_logit, .5):.3f} / {pct(gate_logit, .9):.3f} / "
+          f"{pct(gate_logit, .99):.3f} / {pct(gate_logit, .999):.3f} / {gate_logit.max().item():.3f}")
+    print(f"  --> natural routing hit-zero tau     : {gate_logit.max().item():.3f} (tau above this: nothing routes, nat = core-only)")
+    print(f"  --> provable routing hit-zero tau    : {lb.max().item():.3f} (tau above this: cert = 0)")
     print(f"  ub quantiles 10/50/90               : {pct(ub, .1):.3f} / {pct(ub, .5):.3f} / {pct(ub, .9):.3f}")
     print(f"  width (ub-lb) median                : {pct(ub - lb, .5):.3f}")
     print(f"  --- routing alignment ---")

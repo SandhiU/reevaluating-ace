@@ -28,7 +28,9 @@ import sys
 # Never compare the two: "pre_gate" rows are a branch report card, not an ACE result.
 
 
-def detect_stage(header):
+def detect_cert_phase(header):
+    # ACE writes cert_log.csv at two points during a run: an intermediate log during
+    # gate training (has adv_threshold) and the definitive cert pass (has nat_branch).
     if "nat_branch" in header:
         return "final"
     if "adv_threshold" in header:
@@ -80,7 +82,7 @@ def read_summary(cert_log_path):
             if any(r[i].strip() == "1" for i in ver_ok if i < len(r))
         ) / n
 
-    return {"nat": nat, "pgd": pgd, "cert": cert, "n": n, "stage": detect_stage(header)}
+    return {"nat": nat, "pgd": pgd, "cert": cert, "n": n, "cert_phase": detect_cert_phase(header)}
 
 
 def parse_run_dir(path):
@@ -96,9 +98,11 @@ def parse_run_dir(path):
     exp_id = os.path.basename(os.path.dirname(parent))
     exp_name = os.path.basename(os.path.dirname(os.path.dirname(parent)))
 
-    # tau/gate_type are not in the path (they're in args.json) — try to read them
+    # tau/gate_type/train_mode are not in the path (they're in args.json)
     tau = None
     gate_type = None
+    train_mode = None
+    cert_domain = None
     args_path = os.path.join(path, "args.json")
     if os.path.exists(args_path):
         import json
@@ -106,6 +110,11 @@ def parse_run_dir(path):
             args = json.load(f)
         tau = args.get("gate_threshold")
         gate_type = args.get("gate_type")
+        train_mode = args.get("train_mode")
+        cd = args.get("cert_domain")
+        if isinstance(cd, (list, tuple)):
+            cd = "+".join(str(x) for x in cd)
+        cert_domain = cd
 
     # net_eps: '<net>_<eps>' → eps is the last float token
     m = re.search(r"([0-9]+\.[0-9]+)$", net_eps)
@@ -119,6 +128,8 @@ def parse_run_dir(path):
         "eps": eps,
         "tau": tau,
         "gate_type": gate_type,
+        "train_mode": train_mode,
+        "cert_domain": cert_domain,
     }
 
 
@@ -132,6 +143,8 @@ def main():
                     help="Optional extra label column (e.g. 'sabr_2_255')")
     ap.add_argument("--version", default=None,
                     help="Filter by version suffix in exp-name (e.g. 'v3' matches 'ibp_2_255_v3'). Use 'all' or omit for no filter.")
+    ap.add_argument("--kind", default="all", choices=["all", "eval", "train"],
+                    help="Filter by pipeline stage: eval (train_mode=cert) or train (selector/other).")
     args = ap.parse_args()
 
     version_filter = None
@@ -148,6 +161,19 @@ def main():
         if version_filter and not meta["exp_name"].endswith(f"_{version_filter}"):
             continue
 
+        # kind: our pipeline stage. Prefer the run's own train_mode from args.json
+        # (cert = evaluation, anything else = a training run such as selector training);
+        # fall back to the _eval_ naming only if args.json is missing.
+        tm = meta.get("train_mode")
+        if tm == "cert":
+            kind = "eval"
+        elif tm:
+            kind = "train"
+        else:
+            kind = "eval" if "_eval_" in meta["exp_name"] else "train"
+        if args.kind and args.kind != "all" and kind != args.kind:
+            continue
+
         cert_log_path = os.path.join(root, "cert_log.csv")
         summary = read_summary(cert_log_path)
         if summary is None:
@@ -161,7 +187,9 @@ def main():
             "eps": meta["eps"],
             "tau": meta["tau"],
             "gate_type": meta["gate_type"],
-            "stage": summary["stage"],
+            "kind": kind,
+            "cert_phase": summary["cert_phase"],
+            "cert_domain": meta["cert_domain"],
             "nat_acc": summary["nat"],
             "pgd_acc": summary["pgd"],
             "cert_acc": summary["cert"],
@@ -175,7 +203,7 @@ def main():
         print(f"No cert_log.csv found under {args.results_dir}")
         sys.exit(1)
 
-    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type", "stage",
+    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type", "kind", "cert_phase", "cert_domain",
               "nat_acc", "pgd_acc", "cert_acc", "n_samples", "run_dir"]
     fields = [f for f in fields if any(f in r for r in rows_out)]
 
@@ -187,7 +215,8 @@ def main():
 
     print(f"Wrote {len(rows_out)} runs to {args.output}")
     for r in sorted(rows_out, key=lambda x: (str(x.get("eps")), str(x.get("tau")))):
-        print(f"  eps={r['eps']} tau={r['tau']} gate={r['gate_type']} stage={r['stage']} "
+        print(f"  eps={r['eps']} tau={r['tau']} gate={r['gate_type']} kind={r['kind']} "
+              f"phase={r['cert_phase']} dom={r['cert_domain']} "
               f"nat={r['nat_acc']:.4f} pgd={r['pgd_acc']:.4f} cert={r['cert_acc']:.4f}")
 
 

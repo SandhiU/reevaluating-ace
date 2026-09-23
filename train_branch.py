@@ -8,9 +8,9 @@ ACE thesis certified training. Full CIFAR-10 (no subset). Per run it saves:
   - logs/<run>.csv         ExperimentLogger CSV
 
 Examples:
-  python train_cert_net.py --method sabr      --eps 0.00784313725 --epochs 160   # SABR eps=2/255
-  python train_cert_net.py --method mtl_ibp   --eps 0.03137254901 --epochs 160   # MTL-IBP eps=8/255
-  python train_cert_net.py --method crown_ibp --eps 0.00784313725 --epochs 160   # CROWN-IBP eps=2/255
+  python train_branch.py --method sabr      --eps 0.00784313725 --epochs 160   # SABR eps=2/255
+  python train_branch.py --method mtl_ibp   --eps 0.03137254901 --epochs 160   # MTL-IBP eps=8/255
+  python train_branch.py --method crown_ibp --eps 0.00784313725 --epochs 160   # CROWN-IBP eps=2/255
 
 Architectures (--arch):
   - ace_c2 / ace_c3 / ace_c5 (DEFAULT: ace_c3): mirror ACE's branch nets exactly
@@ -99,6 +99,24 @@ def build_model(arch, in_shape):
     raise ValueError(f"unknown --arch {arch!r} (have: cnn7_shi, ace_c2, ace_c3, ace_c5)")
 
 
+def _coerce(v):
+    """Parse a --set value: none/()/comma-list -> tuple, int, float, else str."""
+    s = v.strip()
+    if s in ("none", "()"):
+        return ()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
+        return tuple(int(x) for x in s.split(",")) if s else ()
+    if "," in s:
+        return tuple(int(x) for x in s.split(","))
+    for cast in (int, float):
+        try:
+            return cast(s)
+        except ValueError:
+            pass
+    return v
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--method", choices=sorted(WRAPPERS), required=True)
@@ -120,6 +138,8 @@ def main():
     ap.add_argument("--eval-samples", type=int, default=2000)
     ap.add_argument("--ckpt-interval", type=int, default=10)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra CTRAIN wrapper kwarg (repeatable), e.g. --set pgd_steps=8")
     args = ap.parse_args()
 
     if args.run_dir is None:
@@ -140,13 +160,13 @@ def main():
         },
     )
 
-    print(f"[train_cert_net] loading CIFAR-10 (root={args.data_root}) ...", flush=True)
+    print(f"[train_branch] loading CIFAR-10 (root={args.data_root}) ...", flush=True)
     train_loader, test_loader = load_cifar10(
         batch_size=args.batch_size, val_split=False, data_root=args.data_root,
     )
 
     model = build_model(args.arch, IN_SHAPE).to(args.device)
-    print(f"[train_cert_net] {args.arch}: {sum(p.numel() for p in model.parameters()):,} params", flush=True)
+    print(f"[train_branch] {args.arch}: {sum(p.numel() for p in model.parameters()):,} params", flush=True)
 
     wrapper_kwargs = dict(
         model=model, input_shape=IN_SHAPE, eps=args.eps, num_epochs=args.epochs,
@@ -160,18 +180,29 @@ def main():
     if alpha_kw is not None and args.alpha is not None:
         wrapper_kwargs[alpha_kw] = args.alpha
 
+    # passthrough of the rest of the wrapper hyperparameters (see branch_hp in config.sh)
+    for item in args.set:
+        key, sep, val = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--set needs KEY=VALUE, got {item!r}")
+        parsed = _coerce(val)
+        if key == "lr_decay_factor":
+            wrapper_kwargs["lr_decay_kwargs"]["gamma"] = parsed
+        else:
+            wrapper_kwargs[key] = parsed
+
     if args.entropy_loss_weight:
         from entropy_trainers import enable_entropy_loss
         enable_entropy_loss(args.entropy_loss_weight)
 
     wrapper = WRAPPERS[args.method](**wrapper_kwargs)
 
-    print(f"[train_cert_net] training {args.method} (eps={args.eps}, {args.epochs} epochs) ...", flush=True)
+    print(f"[train_branch] training {args.method} (eps={args.eps}, {args.epochs} epochs) ...", flush=True)
     t0 = time.time()
     wrapper.train_model(train_loader)
     train_seconds = time.time() - t0
 
-    print(f"[train_cert_net] final evaluate ({args.eval_samples} test samples) ...", flush=True)
+    print(f"[train_branch] final evaluate ({args.eval_samples} test samples) ...", flush=True)
     std_acc, cert_acc, adv_acc = wrapper.evaluate(test_loader, test_samples=args.eval_samples)
 
     model_path = os.path.join(args.run_dir, "final_model_state.pt")
@@ -191,8 +222,8 @@ def main():
         json.dump(results, f, indent=2)
     log.log_final(results)
 
-    print(f"[train_cert_net] DONE  std={std_acc:.4f} cert={cert_acc:.4f} adv={adv_acc:.4f}  ({train_seconds / 60:.1f} min)", flush=True)
-    print(f"[train_cert_net] run dir: {args.run_dir}", flush=True)
+    print(f"[train_branch] DONE  std={std_acc:.4f} cert={cert_acc:.4f} adv={adv_acc:.4f}  ({train_seconds / 60:.1f} min)", flush=True)
+    print(f"[train_branch] run dir: {args.run_dir}", flush=True)
 
 
 if __name__ == "__main__":

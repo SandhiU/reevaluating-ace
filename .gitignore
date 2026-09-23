@@ -9,6 +9,7 @@ __pycache__/
 ACE/
 old_ACE/
 old_scripts/
+scripts/data
 
 # Data — keep data/ (holds cifar-10 .tar for download reference),
 # ignore the extracted batches
@@ -26,6 +27,10 @@ models_new/
 runs/
 converted/
 results/
+dumps/
+figures/
+labels/
+labels_test/
 
 # Slurm / logs
 logs/
