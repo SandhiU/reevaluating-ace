@@ -6,13 +6,17 @@
 #
 # Stages:
 #   train_core   train the trunk (core-network) with PGD adv training
+#   eval_core    evaluate a retrained core (nat + PGD at --eps)
 #   train        train the branch with CTRAIN
 #   convert      CTRAIN checkpoint -> ACE format
 #   labels       alpha-CROWN labels for the branch (selector targets)
 #   selector     train the selection mechanism on those labels
 #   roc          gate ROC figure from the trained selector
-#   labels_eval      gate + branch verification (IBP / CROWN / alpha-CROWN)
+#   roc_released gate ROC figure for a RELEASED ACE model (ibp|colt)
+#   labels_eval  gate + branch verification (IBP / CROWN / alpha-CROWN)
+#   cross_gate   cross-gate eval: gate from one method, branch from another
 #   eval         evaluate the composition (box / alpha-CROWN)
+#   released     evaluate a RELEASED ACE composition (ibp|colt) on our trunk
 #   aggregate    collect cert_log.csv into results/agg_<ver>.csv
 #   all          run the branch pipeline end to end (train -> ... -> aggregate)
 #   status       show what each stage has produced
@@ -33,6 +37,8 @@
 #   --sel | --ent        selector type (default --sel)
 #   --eps SET            2_255 | 8_255 | both (default both)
 #   --verify MODE        box | alpha | all (default box)
+#   --batch-size N       labels_eval verifier batch size (default 16; small on purpose,
+#                        the alpha-CROWN backward OOMs at ACE's default 100)
 #   --tau VALUE          override the gate-threshold grid (e.g. --tau 0.0)
 #   --kind MODE          aggregate: all | eval | train (default all)
 #   --trunk-model PATH   explicit trunk override
@@ -40,13 +46,16 @@
 #   --dry-run            print the sbatch lines, do not submit
 #
 # Examples:
-#   bash pipeline.sh train_core --eps 8_255 --ver v5
-#   bash pipeline.sh train sabr --ver v5 --sel
-#   bash pipeline.sh labels all --in_ver v5 --ver v5
-#   bash pipeline.sh eval mtl-ibp --gate-model ibp --in_ver v5 --in-gate-model v5 --ver v5 --sel
-#   bash pipeline.sh eval all --in_ver v5 --ver v5
-#   bash pipeline.sh all ibp --ver test-22-09-2026-01 --in_ver alpha_v3 --sel --verify all
-#   bash pipeline.sh aggregate --in_ver test-22-09-2026-01
+#   bash pipeline.sh train_core --eps 8_255 --ver <ver>
+#   bash pipeline.sh train sabr --ver <ver> --sel
+#   bash pipeline.sh labels all --in_ver <ver> --ver <ver>
+#   bash pipeline.sh labels_eval all --in_ver <ver> --ver <ver> --eps 2_255
+#   bash pipeline.sh eval mtl-ibp --gate-model ibp --in_ver <ver> --in-gate-model <ver> --ver <ver> --sel
+#   bash pipeline.sh eval all --in_ver <ver> --ver <ver>
+#   bash pipeline.sh released colt --eps 8_255 --ver <ver>
+#   bash pipeline.sh roc_released all --eps 2_255 --ver <ver>
+#   bash pipeline.sh all ibp --ver <ver> --in_ver <ver> --sel --verify all
+#   bash pipeline.sh aggregate --in_ver <ver>
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -79,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --eps)            EPS_SET="$2"; shift 2 ;;
         --verify)         VERIFY="$2"; shift 2 ;;
         --tau)            TAU_OVERRIDE="$2"; shift 2 ;;
+        --batch-size)     LABELS_EVAL_BATCH="$2"; shift 2 ;;
         --kind)           KIND="$2"; shift 2 ;;
         --trunk-model)    TRUNK_OVERRIDE="$2"; shift 2 ;;
         --wait)           WAIT=1; shift ;;
@@ -131,7 +141,19 @@ stage_train_core() {
     echo "== train_core ($VER) eps=$EPS_SET =="
     for e in $(eps_set "$EPS_SET"); do
         run "core_${e}_${VER}" train_core.slurm \
-            --eps "$(eps_of "$e")" --eps-label "$e" --ver "$VER" --exp-id 1
+            --eps "$(eps_of "$e")" --eps-label "$e" --ver "$VER" --exp-id 1 \
+            $(core_hp "$e")
+    done
+}
+
+stage_eval_core() {
+    echo "== eval_core ($VER) eps=$EPS_SET =="
+    for e in $(eps_set "$EPS_SET"); do
+        local ck; ck="$(_latest_core "core_adv_${e}")"
+        [[ -z "$ck" ]] && { echo "  skip eval_core $e: no core run (core_adv_${e}*)"; continue; }
+        echo "  $e -> $ck"
+        run "eval_core_${e}_${VER}" eval_core.slurm \
+            "$ck" "$(eps_of "$e")" "core_adv_${e}_${VER}"
     done
 }
 
@@ -211,11 +233,13 @@ stage_labels_eval() {
         for e in $(eps_set "$EPS_SET"); do
             local name; name="$(sel_name "$m" "$e" "$IN_VER" "$GATE")"
             local dir;  dir="$(find_selector "$name")"
-            [[ -z "$dir" ]] && { echo "  skip gate $m $e: no model $name"; continue; }
+            [[ -z "$dir" ]] && { echo "  skip labels_eval $m $e: no selector $name"; continue; }
             mkdir -p "$RESULTS_DIR/dumps"
             run "labels_eval_${m}_${e}_${VER}" gen_labels_eval.slurm \
                 --run-dir "$dir" --eps "$(eps_of "$e")" \
                 --samples 10000 \
+                --batch-size "$LABELS_EVAL_BATCH" \
+                --mem-limit-gib "$LABELS_EVAL_MEM_LIMIT" \
                 --dump-npz "$RESULTS_DIR/dumps/labels_eval_${m}_${e}_${IN_VER}.npz"
         done
     done
@@ -259,6 +283,96 @@ stage_eval() {
     done
 }
 
+stage_cross_gate() {
+    echo "== cross_gate ($VER, in=$IN_VER, gate=$GATE_MODEL) target=$TARGET =="
+    for m in $(methods "$TARGET"); do
+        for e in $(eps_set "$EPS_SET"); do
+            # branch from the target method's selector
+            local bname; bname="$(sel_name "$m" "$e" "$IN_VER" "$GATE")"
+            local bdir; bdir="$(find_selector "$bname")"
+            [[ -z "$bdir" ]] && { echo "  skip cross_gate $m $e: no branch selector $bname"; continue; }
+            # gate from the gate-model's selector
+            local gname; gname="$(sel_name "$GATE_MODEL" "$e" "$IN_GATE_MODEL" "$GATE")"
+            local gdir; gdir="$(find_selector "$gname")"
+            [[ -z "$gdir" ]] && { echo "  skip cross_gate $m $e: no gate selector $gname"; continue; }
+            local bnet; bnet="$(latest_net "$bdir")"
+            local gnet; gnet="$(latest_net "$gdir")"
+            [[ -z "$bnet" || -z "$gnet" ]] && { echo "  skip cross_gate $m $e: no net checkpoint"; continue; }
+            # extract bare gate/branch from the combined selector checkpoints
+            local xdir="$CONVERTED_DIR/xgate_${GATE_MODEL}_${m}_${e}_${VER}"
+            py "$SCRIPT_DIR/extract_gate_branch.py" --ckpt "$gnet" --out-dir "$xdir/gate"
+            py "$SCRIPT_DIR/extract_gate_branch.py" --ckpt "$bnet" --out-dir "$xdir/branch"
+            local trunk; trunk="${TRUNK_OVERRIDE:-$(trunk_for "$e")}"
+            local tau; tau="$(tau_grid "$GATE")"
+            run "xgate_${m}_${e}_${VER}" eval_ace.slurm \
+                --load-branch-model "$xdir/branch/branch.pt" \
+                --load-gate-model "$xdir/gate/gate.pt" \
+                --load-trunk-model "$trunk" \
+                --gate-type "$( [[ "$GATE" == ent ]] && echo entropy || echo net )" \
+                --gate-threshold "$tau" \
+                --cert-domain box \
+                --eps "$(eps_of "$e")" \
+                --exp-id "$(eval_id "$m" "$e" "$GATE")" \
+                --exp-name "$(eval_name "$m" "$e" "$GATE" "$VER")"
+            # alpha verification: compose gate from one npz, branch from another
+            local gate_npz="$RESULTS_DIR/dumps/labels_eval_${GATE_MODEL}_${e}_${IN_GATE_MODEL}.npz"
+            local branch_npz="$RESULTS_DIR/dumps/labels_eval_${m}_${e}_${IN_VER}.npz"
+            if [[ -f "$gate_npz" && -f "$branch_npz" ]]; then
+                local taus=()
+                [[ -n "$TAU_OVERRIDE" ]] && taus=(--taus "$TAU_OVERRIDE")
+                mkdir -p "$RESULTS_DIR"
+                py "$SCRIPT_DIR/combine_labels_eval.py" \
+                    --npz "$branch_npz" --gate-npz "$gate_npz" "${taus[@]}" \
+                    --out "$RESULTS_DIR/labels_eval_${m}_${e}_xgate-${GATE_MODEL}_${VER}.csv"
+            else
+                echo "  skip alpha cross_gate $m $e: missing npz (gate=$gate_npz branch=$branch_npz)"
+            fi
+        done
+    done
+}
+
+stage_released() {
+    echo "== released ($VER) target=$TARGET eps=$EPS_SET =="
+    for m in $(rel_methods "$TARGET"); do
+        for e in $(eps_set "$EPS_SET"); do
+            local ck; ck="$(REL_MODEL "$m" "$e")"
+            if [[ -z "$ck" ]]; then echo "  skip released $m $e: unknown released method"; continue; fi
+            if [[ ! -f "$ck" && "$DRY" != "1" ]]; then echo "  skip released $m $e: missing $ck"; continue; fi
+            local trunk; trunk="${TRUNK_OVERRIDE:-$(trunk_for "$e")}"
+            run "rel_${m}_${e}_${VER}" eval_ace.slurm \
+                --load-model "$ck" \
+                --load-trunk-model "$trunk" \
+                --gate-type net \
+                --gate-threshold "${TAU_OVERRIDE:-$(tau_grid sel)}" \
+                --cert-domain "$(rel_cert_domain "$m")" \
+                --eps "$(eps_of "$e")" \
+                --exp-id "$(rel_id "$m" "$e")" \
+                --exp-name "rel_${m}_${e}_${VER}"
+        done
+    done
+    echo "  submitted as exp-name rel_<method>_<eps>_$VER; run 'bash pipeline.sh aggregate --in_ver $VER' when done"
+}
+
+stage_roc_released() {
+    echo "== roc_released ($VER) target=$TARGET eps=$EPS_SET =="
+    for m in $(rel_methods "$TARGET"); do
+        for e in $(eps_set "$EPS_SET"); do
+            local ck; ck="$(REL_MODEL "$m" "$e")"
+            if [[ -z "$ck" ]]; then echo "  skip roc_released $m $e: unknown released method"; continue; fi
+            if [[ ! -f "$ck" && "$DRY" != "1" ]]; then echo "  skip roc_released $m $e: missing $ck"; continue; fi
+            # ROC ground truth = "is the branch certifiable". Use box: it is the
+            # cheap, standard choice (same as roc_released.pdf) and zono on a COLT
+            # branch is far too slow/heavy (OOM + walltime limit). Override with
+            # ROC_DOMAIN=zono if you really want the zono ROC (expect long runtimes).
+            run "roc_rel_${m}_${e}_${VER}" gen_roc.slurm \
+                --ckpt "$ck" --eps "$(eps_of "$e")" \
+                --domain "${ROC_DOMAIN:-box}" \
+                $([ "${ROC_DOMAIN:-box}" = zono ] && echo --ver-batch 8) \
+                --output "$FIG_DIR/roc_released_${m}_${e}.pdf"
+        done
+    done
+}
+
 stage_aggregate() {
     echo "== aggregate (in=$IN_VER) =="
     local out="$RESULTS_DIR/agg_${IN_VER}.csv"
@@ -266,6 +380,7 @@ stage_aggregate() {
         --results-dir "$ACE_DIR/models_new" \
         --output "$out" \
         --version "$IN_VER" \
+        --labels-eval-dir "$RESULTS_DIR" \
         --kind "$KIND"
     echo "  -> $out"
 }
@@ -273,15 +388,19 @@ stage_aggregate() {
 # ---- dispatch ----------------------------------------------------------
 case "$STAGE" in
     train_core) stage_train_core ;;
+    eval_core)  stage_eval_core ;;
     train)      stage_train ;;
     convert)    stage_convert ;;
     labels)     stage_labels ;;
     selector)   stage_selector ;;
     roc)        stage_roc ;;
+    cross_gate) stage_cross_gate ;;
     labels_eval)    stage_labels_eval ;;
     eval)       stage_eval ;;
+    released)   stage_released ;;
+    roc_released) stage_roc_released ;;
     aggregate)  stage_aggregate ;;
-    all)        stage_train; wait_jobs; stage_convert; wait_jobs; stage_labels; wait_jobs; stage_selector; wait_jobs; stage_roc; stage_eval; wait_jobs; stage_aggregate ;;
+    all)        stage_train; wait_jobs; stage_convert; wait_jobs; stage_labels; wait_jobs; stage_selector; wait_jobs; stage_labels_eval; wait_jobs; stage_roc; stage_eval; wait_jobs; stage_aggregate ;;
     status)     bash "$SCRIPT_DIR/pipeline_status.sh" "$VER" ;;
-    help|*)     sed -n '2,46p' "$0" ;;
+    help|*)     sed -n '2,59p' "$0" ;;
 esac

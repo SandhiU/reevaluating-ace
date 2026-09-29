@@ -22,6 +22,7 @@ mkdir -p "$HOME/research/scripts/logs"
 # gen_roc imports args_factory/loaders/deepTrunk_networks from ACE, and runs from there
 cd "$HOME/research/ACE" || exit 1
 export PYTHONPATH="$HOME/research/ACE:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
 echo "=== gen_roc ==="

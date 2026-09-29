@@ -2,13 +2,14 @@
 # ============================================================
 # Train the trunk (core-network) with PGD adversarial training.
 #
-# 8/255 needs the balanced loss (nat-factor 0.5); pure adv training there
-# collapses the natural accuracy. 2/255 works with a plain adv loss.
-# Recipe matches ACE's core (EfficientNet-B0, CIFAR-10).
+# 8/255 needs some clean loss, but too large a nat-factor (or a PGD step well above
+# eps/4) collapses robustness. The Madry PGD step size is eps/4 and train_core.py
+# defaults to it. The per-eps recipe lives in config.sh (core_hp) and is passed
+# through the pipeline; the values below are only fallbacks for a direct call.
 #
 # (deploy it yourself: copy to ~/research/scripts/.)
 #   cd ~/research/ACE && sbatch ~/research/scripts/train_core.slurm \
-#       --eps 0.03137254901 --eps-label 8_255 --ver v5
+#       --eps 0.03137254901 --eps-label 8_255 --ver <ver>
 # ============================================================
 #SBATCH --job-name=train_core
 # account + partition come from config.sh via pipeline.sh. For a direct "sbatch <file>", pass --account/--partition.
@@ -37,12 +38,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# per-eps recipe
-if [[ "$EPS_LABEL" == "2_255" ]]; then
-    EPOCHS=40; NAT=0.0; STEPS=8
-else
-    EPOCHS=60; NAT=0.5; STEPS=10
-fi
+# Fallbacks only; config.sh core_hp() overrides these via the pipeline.
+EPOCHS=60; NAT=0.2; STEPS=20
 
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
 echo "=== train_core $EPS_LABEL ($VER) epochs=$EPOCHS nat=$NAT ==="

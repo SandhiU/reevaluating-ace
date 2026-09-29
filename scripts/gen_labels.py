@@ -2,7 +2,7 @@
 """
 Generate alpha-CROWN labels for a CTRAIN branch (shardable, memory-guarded).
 
-v3 (13 Sep 2026):
+Features:
   * `--start` / `--samples` slice the training set, so a job array can shard one branch
     across tasks. Each task writes its own CSV with GLOBAL sample indices, merged later.
   * Memory diagnostics: reports alloc/peak/reserved BEFORE and AFTER per-batch cleanup,
@@ -12,7 +12,7 @@ v3 (13 Sep 2026):
   * `--multi-method` additionally reports the margin under a cheap method first, for the
     label-flip table (box/IBP vs CROWN vs alpha-CROWN on the same samples).
 
-Measured on the H100 (13 Sep): alpha-CROWN batch 4 = 1.06 s/sample, batch 16 = 0.53
+alpha-CROWN throughput: batch 4 = 1.06 s/sample, batch 16 = 0.53
 s/sample, identical labels (4/8) at both batch sizes. batch 100 on the plain-CROWN path
 OOMs by accumulation. Keep batches small, shard long runs.
 
@@ -40,6 +40,7 @@ if os.path.isdir(AUTOLIRPA):
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm  # noqa: E402
 
 from train_branch import build_model, IN_SHAPE  # noqa: E402
+from ace_spec import ace_c_spec  # noqa: E402
 
 # NOTE: keep the leading 1 (shape (1,3,1,1)). This auto_LiRPA version's backward pass
 # asserts const.ndim == 4 in operators/bivariate.py:_multiply_by_const. The "Constant
@@ -93,15 +94,8 @@ def resolve_call(model, want_opt, opt_steps, method):
     return kw, used, list(params.keys())
 
 
-def ace_c_spec(y, n_class, device):
-    """ACE's multi-class specification matrix (networks.py:92-95, get_c_mat).
-
-    rows = logit_true - logit_k for every k, self-spec removed -> (B, n_class-1, n_class).
-    """
-    eye = torch.eye(n_class, dtype=torch.float32, device=device)
-    c = eye[y].unsqueeze(1) - eye.unsqueeze(0)
-    I = ~(y.unsqueeze(1) == torch.arange(n_class, device=device).unsqueeze(0))
-    return c[I].view(y.size(0), n_class - 1, n_class)
+# ace_c_spec lives in ace_spec.py (pure torch, no CTRAIN) so that callers which only
+# need the C-matrix do not pull in train_branch -> CTRAIN -> abCROWN. See ace_spec.py.
 
 
 def margins(model, x_b, y, call_kw, ace_spec=False, n_class=10):
@@ -110,7 +104,7 @@ def margins(model, x_b, y, call_kw, ace_spec=False, n_class=10):
     ace_spec=False (default, what the training labels used):
         lb[y] - max_{k!=y} ub[k], from the bounds on the individual logits. Sound, but a
         *different and stricter* functional than ACE's box verifier uses, so its rate is
-        NOT comparable to ACE's cert (18 Sep measurement: 0.341 vs ACE box 0.486 on IBP
+        NOT comparable to ACE's cert (measured: 0.341 vs ACE box 0.486 on IBP
         2/255, with alpha_only ~ 0 and box_only 0.147).
     ace_spec=True:
         min_k lb[logit_y - logit_k] with ACE's C-matrix, i.e. exactly what
@@ -164,7 +158,7 @@ def main():
     print(f"eps: {args.eps}, device: {device}")
     print(f"optimize: {args.optimize}, opt_steps: {args.opt_steps}, method: {args.alpha_method}")
     print(f"prefilter_method: {args.prefilter_method}")
-    print(f"margin functional: {'ACE C-matrix (min_k lb[logit_y - logit_k])' if args.ace_spec else 'lb[y] - max_k ub[k] (strict, label-v3 behaviour)'}")
+    print(f"margin functional: {'ACE C-matrix (min_k lb[logit_y - logit_k])' if args.ace_spec else 'lb[y] - max_k ub[k] (strict)'}")
 
     branch = load_ctrain_branch(args.ckpt, device, args.arch).eval()
     model = BoundedModule(NormalizedBranch(branch).to(device),

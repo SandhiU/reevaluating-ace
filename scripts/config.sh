@@ -33,20 +33,77 @@ EPS_8="0.03137254901"    # 8/255
 TAU_SEL="-2.0,-1.5,-1.0,-0.7,-0.5,-0.2,0.0,0.2,0.5,0.8,1.0,1.2,1.5,2.0"
 TAU_ENT="-0.9,-0.7,-0.5,-0.3,-0.1"
 
+# ---- verification (labels_eval stage) ------------------------------------
+# The alpha-CROWN backward scales with batch size and accumulates: ACE's default
+# test_batch=100 OOMs (~80 GiB) inside a single batch. gen_labels.py measured 16 as
+# the safe H100 value, and gen_labels_eval.py now batches + frees per batch. Override
+# per run either via env (LABELS_EVAL_BATCH=8 bash pipeline.sh ...) or --batch-size.
+LABELS_EVAL_BATCH="${LABELS_EVAL_BATCH:-16}"
+LABELS_EVAL_MEM_LIMIT="${LABELS_EVAL_MEM_LIMIT:-60}"   # clean exit 2 above this many GiB
+
 # ---- trunks --------------------------------------------------------------
 TRUNK_MODEL_2="$ACE_DIR/trained_models/EB-0_cifar10_adv_2_255.pt"
 TRUNK_MODEL_8="$ACE_DIR/trained_models/EB-0_cifar10_adv_8_255.pt"
-# our retrained cores (used from v4 onwards)
-TRUNK_MODEL_2_NEW="$ACE_DIR/models_new/cifar10/core_adv_2_255/1/efficientnet-b0_pre_0.00784/1789901196/final_model_state.pt"
-TRUNK_MODEL_8_NEW=$(find "$ACE_DIR/models_new/cifar10/core_adv_8_255/3" -name 'best_model.pt' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}' || true)
-if [[ -z "$TRUNK_MODEL_8_NEW" ]]; then
-    TRUNK_MODEL_8_NEW=$(find "$ACE_DIR/models_new/cifar10/core_adv_8_255" -name 'final_model_state.pt' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}' || true)
-fi
+# Our retrained cores. Resolve the newest run automatically, so a retrain
+#   bash pipeline.sh train_core --eps 8_255 --ver <ver>
+# is picked up by convert/labels/eval without editing paths here. best_model.pt wins
+# over final_model_state.pt; newest timestamp wins within each.
+_latest_core() {  # _latest_core <core_adv_eps...>
+    local root="$ACE_DIR/models_new/cifar10" f name
+    for name in best_model.pt final_model_state.pt; do
+        f=$( { find "$root" -path "*/$1*/$name" -printf '%T@ %p\n' 2>/dev/null || true; } \
+             | sort -rn | head -1 | awk '{print $2}' )
+        if [[ -n "$f" ]]; then echo "$f"; return 0; fi
+    done
+    return 0
+}
+TRUNK_MODEL_2_NEW="$(_latest_core core_adv_2_255)"
+TRUNK_MODEL_8_NEW="$(_latest_core core_adv_8_255)"
+
+# ---- released ACE compositions (the control side) ------------------------
+# `released` / `roc_released` stages. Each file below is a released ACE model
+# (branch + SelectionNet gate, trained with --net None -> it carries NO trunk;
+# we supply the trunk with --load-trunk-model).
+#   IBP  -> box  cert domain   (released IBP branches)
+#   COLT -> zono cert domain   (ACE certifies COLT-trained branches with zonotopes)
+REL_MODEL() {  # REL_MODEL <method> <eps_label>
+    case "$1_$2" in
+        ibp_2_255)  echo "$ACE_DIR/trained_models/C3_ACE_Net_IBP_cert_cifar10_2_255.pt" ;;
+        ibp_8_255)  echo "$ACE_DIR/trained_models/C3_ACE_Net_IBP_cert_cifar10_8_255.pt" ;;
+        colt_2_255) echo "$ACE_DIR/trained_models/C3_ACE_Net_COLT_cert_cifar10_2_255.pt" ;;
+        colt_8_255) echo "$ACE_DIR/trained_models/C3_ACE_Net_COLT_cert_cifar10_8_255.pt" ;;
+        *) echo "" ;;
+    esac
+}
+rel_cert_domain() { [[ "$1" == colt ]] && echo zono || echo box; }
+rel_methods() {     # `all` covers both control methods; --eps picks the epsilon
+    case "$1" in
+        all)        echo "ibp colt" ;;
+        ibp|colt)   echo "$1" ;;
+        *) echo "unknown released target: $1 (use ibp|colt|all)" >&2; exit 1 ;;
+    esac
+}
+rel_id() {  # stable exp-ids, 500+ (no clash with selector 300+/eval 400+)
+    case "$1_$2" in ibp_2_255) echo 500 ;; ibp_8_255) echo 501 ;; colt_2_255) echo 502 ;; colt_8_255) echo 503 ;; *) echo 500 ;; esac
+}
 
 # ---- branch training hyperparameters -------------------------------------
 # fill in from the supervisor's values; branch_hp returns the extra flags for
 # train_branch.slurm. Keep --epochs and --lr-milestones, add --alpha where the
 # method needs it (SABR lambda, MTL-IBP alpha).
+# ---- core (trunk) training recipe ----------------------------------------
+# core_hp returns the extra flags for train_core.slurm. The Madry PGD step size is
+# eps/4 and train_core.py now defaults to it, so it is not set here. --nat-factor
+# blends clean/adv loss (0 = pure adv, 0.5 = balanced). Too large a nat-factor, or a
+# PGD step well above eps/4, collapses robustness; keep the step near eps/4.
+core_hp() {  # core_hp <eps_label>
+    case "$1" in
+        2_255) echo "--nat-factor 0.0 --pgd-steps-train 8 --epochs 40" ;;
+        8_255) echo "--nat-factor 0.2 --pgd-steps-train 20 --epochs 80" ;;
+        *)     echo "" ;;
+    esac
+}
+
 # ---- branch training hyperparameters -------------------------------------
 # Best values per method and epsilon (from the supervisor). branch_hp returns the
 # flags for train_branch.slurm: --epochs, --lr-milestones, --alpha, and the CTRAIN
@@ -88,7 +145,7 @@ branch_pt()  { echo "$CONVERTED_DIR/$1_$2_$3_branch.pt"; }
 label_csv()  { echo "$LABELS_DIR/labels_alpha_crown_$1_$2_$3.csv"; }
 
 # resolve an existing input branch/labels: versioned name first, then the
-# unversioned name the pre-v5 pipeline used (converted/<m>_<e>_branch.pt etc).
+# unversioned fallback name (converted/<m>_<e>_branch.pt etc).
 branch_in() {
     local p; p="$(branch_pt "$1" "$2" "$3")"
     [[ -f "$p" ]] && { echo "$p"; return 0; }

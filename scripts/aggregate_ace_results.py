@@ -142,9 +142,12 @@ def main():
     ap.add_argument("--label", default=None,
                     help="Optional extra label column (e.g. 'sabr_2_255')")
     ap.add_argument("--version", default=None,
-                    help="Filter by version suffix in exp-name (e.g. 'v3' matches 'ibp_2_255_v3'). Use 'all' or omit for no filter.")
+                    help="Filter by a version suffix in the exp-name. Use 'all' or omit for no filter.")
     ap.add_argument("--kind", default="all", choices=["all", "eval", "train"],
                     help="Filter by pipeline stage: eval (train_mode=cert) or train (selector/other).")
+    ap.add_argument("--labels-eval-dir", default=None,
+                    help="Directory containing labels_eval CSVs (from the compose step). "
+                         "If set, cert_box/cert_crown/cert_alpha columns are added per tau.")
     args = ap.parse_args()
 
     version_filter = None
@@ -189,10 +192,9 @@ def main():
             "gate_type": meta["gate_type"],
             "kind": kind,
             "cert_phase": summary["cert_phase"],
-            "cert_domain": meta["cert_domain"],
             "nat_acc": summary["nat"],
             "pgd_acc": summary["pgd"],
-            "cert_acc": summary["cert"],
+            "box_cert_acc": summary["cert"],
             "n_samples": summary["n"],
         }
         if args.label:
@@ -203,8 +205,79 @@ def main():
         print(f"No cert_log.csv found under {args.results_dir}")
         sys.exit(1)
 
-    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type", "kind", "cert_phase", "cert_domain",
-              "nat_acc", "pgd_acc", "cert_acc", "n_samples", "run_dir"]
+    # -- labels_eval merge: attach cert_box/cert_crown/cert_alpha per tau -----------------
+    le_by_exp_tau = {}  # (exp_name, tau) -> {routing_box, branch_ver_box, cert_box, ...}
+    if args.labels_eval_dir:
+        _methods = ("mtl_ibp", "crown_ibp", "ibp", "sabr")  # longer prefixes first
+        _epses = ("2_255", "8_255")
+        _prefixes = [f"{m}_{e}" for m in _methods for e in _epses]
+        n_files = 0
+        for fname in os.listdir(args.labels_eval_dir):
+            if not fname.startswith("labels_eval_") or not fname.endswith(".csv"):
+                continue
+            stem = fname[len("labels_eval_"):-len(".csv")]
+            # Accept the cross-gate naming too:
+            #   xgate-<gate>_<method>_<eps>_<ver> -> <method>_<eps>_xgate-<gate>_<ver>
+            # (the cross-gate eval exp-name is <m>_<eps>_xgate-<gate>_sel_eval_<ver>,
+            #  whose selector name is <m>_<eps>_xgate-<gate>_<ver>).
+            mo = re.match(
+                r"xgate-(?P<gate>.+?)_(?P<m>mtl_ibp|crown_ibp|ibp|sabr)_(?P<eps>2_255|8_255)_(?P<ver>.+)$",
+                stem)
+            if mo:
+                stem = f"{mo['m']}_{mo['eps']}_xgate-{mo['gate']}_{mo['ver']}"
+            exp_name = None
+            for p in _prefixes:
+                if stem.startswith(p + "_"):
+                    exp_name = stem
+                    break
+            if exp_name is None:
+                continue
+            if version_filter and not exp_name.endswith(f"_{version_filter}"):
+                continue
+            path = os.path.join(args.labels_eval_dir, fname)
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh):
+                    try:
+                        tau = float(row["tau"])
+                        v = row["verifier"]
+                    except (KeyError, ValueError):
+                        continue
+                    key = (exp_name, tau)
+                    if key not in le_by_exp_tau:
+                        le_by_exp_tau[key] = {}
+                    le_by_exp_tau[key][f"cert_{v}"] = float(row.get("cert", "nan"))
+                    le_by_exp_tau[key][f"routing_{v}"] = float(row.get("routing", "nan"))
+                    le_by_exp_tau[key][f"branch_ver_{v}"] = float(row.get("branch_ver", "nan"))
+            n_files += 1
+        if le_by_exp_tau:
+            print(f"  [labels_eval] merged {n_files} files ({len(le_by_exp_tau)} exp_name/tau pairs)")
+        else:
+            print(f"  [labels_eval] no matching files in {args.labels_eval_dir}")
+
+    def sel_name_from_eval(en):
+        """eval_name '<m>_<eps>_sel_eval_<ver>' -> sel_name '<m>_<eps>_<ver>'."""
+        return en.replace("_sel_eval_", "_")
+
+    # attach cert columns to aggregate rows
+    has_le = bool(le_by_exp_tau)
+    le_cert_keys = ["alpha_cert_acc"]
+    if has_le:
+        for row in rows_out:
+            key = (sel_name_from_eval(row["exp_name"]), row["tau"])
+            le = le_by_exp_tau.get(key, {})
+            row["alpha_cert_acc"] = le.get("cert_alpha", float("nan"))
+            for k in ["routing_box", "routing_crown", "routing_alpha",
+                      "branch_ver_box", "branch_ver_crown", "branch_ver_alpha"]:
+                row[k] = le.get(k, float("nan"))
+
+    fields = ["label", "exp_name", "exp_id", "eps", "tau", "gate_type", "kind", "cert_phase",
+              "nat_acc", "pgd_acc", "box_cert_acc"]
+    if has_le:
+        fields += ["alpha_cert_acc"]
+    fields += ["n_samples", "run_dir"]
+    if has_le:
+        fields += ["routing_box", "routing_crown", "routing_alpha",
+                   "branch_ver_box", "branch_ver_crown", "branch_ver_alpha"]
     fields = [f for f in fields if any(f in r for r in rows_out)]
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
@@ -215,9 +288,11 @@ def main():
 
     print(f"Wrote {len(rows_out)} runs to {args.output}")
     for r in sorted(rows_out, key=lambda x: (str(x.get("eps")), str(x.get("tau")))):
+        alpha = r.get("alpha_cert_acc")
+        alpha_s = f"{alpha:.4f}" if isinstance(alpha, float) else "-"
         print(f"  eps={r['eps']} tau={r['tau']} gate={r['gate_type']} kind={r['kind']} "
-              f"phase={r['cert_phase']} dom={r['cert_domain']} "
-              f"nat={r['nat_acc']:.4f} pgd={r['pgd_acc']:.4f} cert={r['cert_acc']:.4f}")
+              f"phase={r['cert_phase']} "
+              f"nat={r['nat_acc']:.4f} pgd={r['pgd_acc']:.4f} box={r['box_cert_acc']:.4f} alpha={alpha_s}")
 
 
 if __name__ == "__main__":

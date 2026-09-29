@@ -19,6 +19,8 @@ conda activate ace
 mkdir -p "$HOME/research/scripts/logs"
 cd "$HOME/research/ACE" || exit 1
 export PYTHONPATH="$HOME/research/ACE:${PYTHONPATH:-}"
+# Reduce allocator fragmentation; the alpha-CROWN backward churns large blocks.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null
 echo "=== gen_labels_eval ==="

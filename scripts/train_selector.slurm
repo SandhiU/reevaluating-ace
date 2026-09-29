@@ -29,10 +29,10 @@
 #   # SelectionNet gate trained on alpha-CROWN labels instead of box labels
 #   sbatch --job-name=sel_ibp2_alpha train_selector.slurm \
 #       --branch ../converted/ibp_2_255_branch.pt --gate-type net --eps 0.00784313725 \
-#       --gate-labels-csv ../labels/labels_alpha_crown_ibp_2_255.csv --exp-id 230 --exp-name ibp_2_255_alpha_v3
+#       --gate-labels-csv ../labels/labels_alpha_crown_ibp_2_255.csv --exp-id 230 --exp-name ibp_2_255
 #
 #   # Fast crash test (2 epochs, 50 batches/epoch) — numbers meaningless, exit code matters
-#   sbatch --job-name=smoke_ent train_selector.slurm \
+#   sbatch --job-name=sel_ibp2_ent train_selector.slurm \
 #       --branch ../converted/ibp_2_255_branch.pt \
 #       --gate-type entropy --eps 0.00784313725 --smoke
 #
@@ -157,5 +157,5 @@ else
     echo "=== train_selector FAILED: python exit=$rc — this run did NOT train (see the .err) ==="
 fi
 # Propagate the python status: without this, the trailing echo makes slurm report
-# COMPLETED even when deepTrunk_main.py crashed (bitten 14 Sep: 4 gates 'COMPLETED' in 88 s).
+# COMPLETED even when deepTrunk_main.py crashed.
 exit $rc

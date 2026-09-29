@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # running from inside ~/research/ACE, the ACE modules are importable as-is;
 # fall back to a local copy if present
 sys.path.insert(0, os.getcwd())
-# 17 Sep: slurm jobs run from scripts/, where getcwd() is useless -> import
+# slurm jobs run from scripts/, where getcwd() is useless -> import
 # args_factory from the ACE tree explicitly (ACE_DIR env wins if set).
 _ace_dir = os.path.expanduser(os.environ.get("ACE_DIR") or "~/research/ACE")
 if os.path.isdir(_ace_dir):
@@ -139,7 +139,7 @@ def main():
                          "Default box = what every cert number so far used. l_CROWN / "
                          "l_CROWN-IBP go through ACE's auto_LiRPA path and give tighter "
                          "gate bounds, i.e. MORE provable routing at the same tau, which is "
-                         "the binding constraint at high nat (18 Sep). The branch verdict "
+                         "the binding constraint at high nat. The branch verdict "
                          "stays on box so the two runs are comparable sample by sample.")
     ap.add_argument("--eps", type=float, default=None, help="override test eps")
     ap.add_argument("--dump-npz", default=None,

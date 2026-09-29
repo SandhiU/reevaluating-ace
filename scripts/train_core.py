@@ -5,7 +5,7 @@ ACE's main.py doesn't work for EfficientNet (UpscaleNet.determine_dims sets
 dims=None). This script loads the model via ACE's get_net() and trains it
 with PGD adversarial training.
 
-Recipe (v3, 22 Sep 2026):
+Recipe:
   - EfficientNet-B0, pretrained, CIFAR-10
   - PGD step size = eps/4 (Madry standard)
   - Adam, lr=1e-3, step decay (--lr-step, --lr-factor) or cosine
@@ -92,8 +92,8 @@ def main():
                     help="Blend factor for clean loss: loss = (1-f)*adv + f*nat. 0=pure adv, 0.5=balanced")
     ap.add_argument("--pgd-steps-train", type=int, default=20)
     ap.add_argument("--pgd-steps-test", type=int, default=40)
-    ap.add_argument("--pgd-step-size", type=float, default=0.25,
-                    help="Step size in ACE error space [-1,1]; 0.25 = eps/4 in pixel space (Madry standard)")
+    ap.add_argument("--pgd-step-size", type=float, default=None,
+                    help="PGD step size in pixel space. Default: eps/4 (Madry standard).")
     ap.add_argument("--pgd-step-size-test", type=float, default=0.035,
                     help="PGD step size for eval in pixel space; matches ACE's test-att-step-size")
     ap.add_argument("--l1-reg", type=float, default=1e-5)
@@ -101,9 +101,10 @@ def main():
     ap.add_argument("--save-dir", default=None)
     a = ap.parse_args()
 
-    # Default step size = 0.25 (ε/4 in pixel space, ACE convention in error space)
+    # Madry standard: alpha = eps/4. (A bare 0.25 here was ~8x eps at 8/255, so every
+    # step jumped to the corner of the eps-ball and the attack degenerated.)
     if a.pgd_step_size is None:
-        a.pgd_step_size = 0.25
+        a.pgd_step_size = a.train_eps / 4
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"=== core training: {a.exp_name} ===")

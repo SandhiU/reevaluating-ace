@@ -24,7 +24,7 @@ Architectures (--arch):
 Notes:
   - CTRAIN wrapper names are the CURRENT installed ones: SABRModelWrapper,
     MTLIBPModelWrapper, ShiIBPModelWrapper, CrownIBPModelWrapper
-    (checked 18 Aug 2026 on HPC).
+    (checked on HPC).
   - --alpha maps to sabr_subselection_ratio (SABR) / mtl_ibp_alpha (MTL-IBP);
     omitted -> the wrapper's paper default (0.2 / 0.5). IBP and CROWN-IBP
     have no alpha.
@@ -99,6 +99,24 @@ def build_model(arch, in_shape):
     raise ValueError(f"unknown --arch {arch!r} (have: cnn7_shi, ace_c2, ace_c3, ace_c5)")
 
 
+def _coerce(v):
+    """Parse a --set value: none/()/comma-list -> tuple, int, float, else str."""
+    s = v.strip()
+    if s in ("none", "()"):
+        return ()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
+        return tuple(int(x) for x in s.split(",")) if s else ()
+    if "," in s:
+        return tuple(int(x) for x in s.split(","))
+    for cast in (int, float):
+        try:
+            return cast(s)
+        except ValueError:
+            pass
+    return v
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--method", choices=sorted(WRAPPERS), required=True)
@@ -120,6 +138,8 @@ def main():
     ap.add_argument("--eval-samples", type=int, default=2000)
     ap.add_argument("--ckpt-interval", type=int, default=10)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra CTRAIN wrapper kwarg (repeatable), e.g. --set pgd_steps=8")
     args = ap.parse_args()
 
     if args.run_dir is None:
@@ -159,6 +179,17 @@ def main():
     alpha_kw = ALPHA_KW[args.method]
     if alpha_kw is not None and args.alpha is not None:
         wrapper_kwargs[alpha_kw] = args.alpha
+
+    # passthrough of the rest of the wrapper hyperparameters (see branch_hp in config.sh)
+    for item in args.set:
+        key, sep, val = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--set needs KEY=VALUE, got {item!r}")
+        parsed = _coerce(val)
+        if key == "lr_decay_factor":
+            wrapper_kwargs["lr_decay_kwargs"]["gamma"] = parsed
+        else:
+            wrapper_kwargs[key] = parsed
 
     if args.entropy_loss_weight:
         from entropy_trainers import enable_entropy_loss

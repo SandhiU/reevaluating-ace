@@ -23,6 +23,8 @@ The selector decides per input: if the branch can certify it, use the branch; ot
   selector     gate trained on those labels                  -> ACE/models_new/...
   roc          gate ROC figure                               -> figures/
   eval         composition eval, sweep tau                   -> cert_log.csv per run
+  released     evaluate a RELEASED ACE model (ibp|colt)      -> ACE/models_new/.../rel_*
+  roc_released gate ROC of a RELEASED ACE model             -> figures/roc_released_*
   aggregate    collect cert_log.csv into one CSV             -> results/agg_<ver>.csv
 ```
 
@@ -50,6 +52,7 @@ bash pipeline.sh <stage> <target> [flags]
 # flags:   --ver VER  --in_ver VER  --gate-model METHOD  --in-gate-model VER
 #          --sel | --ent   --eps 2_255|8_255|both
 #          --verify box|alpha|alpha-gate|all   --trunk-model PATH   --dry-run
+# released / roc_released targets are ibp | colt | all (not the CTRAIN methods)
 
 bash pipeline.sh train_core --eps 8_255 --ver v5            # trunk
 bash pipeline.sh train sabr --ver v5 --sel                  # branch (+ convert)
@@ -57,6 +60,8 @@ bash pipeline.sh labels all --ver v5                        # alpha-CROWN labels
 bash pipeline.sh selector all --ver v5 --sel                # gates
 bash pipeline.sh roc all --ver v5 --sel                     # ROC figures
 bash pipeline.sh eval all --in_ver v5 --ver v5 --sel        # compositions
+bash pipeline.sh released colt --eps 8_255 --ver v7         # released COLT 8/255
+bash pipeline.sh roc_released colt --eps both --ver v7      # released COLT ROCs
 bash pipeline.sh aggregate --in_ver v5                      # CSV of all eval runs
 
 # single model, or a cross-gate pairing:
@@ -86,7 +91,7 @@ research/
 └── results/        aggregated results
 ```
 
-`00_config.sh` holds all shared paths, the epsilon values, the tau grids, the trunks, and `branch_hp()` (the branch hyperparameters). It also carries the exp-id scheme and the model-discovery helpers used by the pipeline.
+`config.sh` holds all shared paths, the epsilon values, the tau grids, the trunks, and `branch_hp()` (the branch hyperparameters). It also carries the exp-id scheme and the model-discovery helpers used by the pipeline.
 
 ## Verification
 

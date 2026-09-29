@@ -17,10 +17,10 @@
 #
 # Custom checkpoint (pass via --wrap):
 #   sbatch --time=0:30:00 --gres=gpu:1 --account <acct> --partition <part> \
-#     --job-name=eval_core_v4_8_255 --output=logs/eval_core_v4_8_255_%j.out \
-#     --error=logs/eval_core_v4_8_255_%j.err \
+#     --job-name=eval_core_8_255 --output=logs/eval_core_8_255_%j.out \
+#     --error=logs/eval_core_8_255_%j.err \
 #     --wrap="bash ~/research/scripts/eval_core.slurm \
-#       'models_new/cifar10/core_adv_8_255/1/efficientnet-b0_pre_0.03137/1789939620/final_model_state.pt' \
+#       'models_new/cifar10/core_adv_8_255/<id>/efficientnet-b0_pre_0.03137/<ts>/final_model_state.pt' \
 #       0.03137254901 core_adv_8_255"
 #
 # Output: logs/eval_core_<jobid>.out

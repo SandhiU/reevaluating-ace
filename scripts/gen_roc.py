@@ -11,7 +11,7 @@ Usage (run from ~/research/ACE with ace env):
   python ../scripts/gen_roc.py --ckpt <net_*.pt> --eps 0.00784 --label ibp2
 """
 
-import argparse, glob, json, os, sys
+import argparse, glob, json, os, sys, gc
 import numpy as np
 import torch
 import torch.nn as nn
@@ -101,6 +101,14 @@ def main():
     ap.add_argument("--eps", type=float, default=None)
     ap.add_argument("--output", default=None)
     ap.add_argument("--label", default=None)
+    # Ground-truth certifier for the "is this sample branch-certifiable?" label.
+    # box  -> IBP-trained branches (released IBP, our CTRAIN branches)
+    # zono -> COLT-trained branches (ACE certifies COLT with zonotopes)
+    ap.add_argument("--domain", default="box", choices=["box", "zono"])
+    # zonotope verification keeps an extra error dimension that balloons memory;
+    # verify in smaller sub-batches (default 256 works for box on H100, use ~64 for zono).
+    ap.add_argument("--ver-batch", type=int, default=0,
+                    help="sub-batch size for branch verification (0 = use loader batch size)")
     args = ap.parse_args()
 
     if args.run_dir is None and args.ckpt is None:
@@ -136,7 +144,8 @@ def main():
     exit_idx = dTNet.exit_ids[1]
     gate_cnet = dTNet.gate_cnets[exit_idx]
     branch_cnet = dTNet.branch_cnets[exit_idx]
-    domain = "box"
+    domain = args.domain
+    ver_batch = args.ver_batch if args.ver_batch > 0 else None  # None = use loader batch
 
     # ---------- collect per-sample gate logit + branch cert ----------
     gate_logits_all = []
@@ -157,12 +166,23 @@ def main():
 
             # raw gate logit (the score the gate outputs)
             gate_logit = dTNet.gate_nets[exit_idx].forward(inputs).squeeze(-1)  # (B,)
+            gate_logits_all.append(gate_logit.cpu().float())
 
             # branch verification (true label): lb on classification margin
-            ver, margin_n, _ = branch_cnet.get_abs_loss(inputs, targets, eps, domain, 0, beta=1)
-
-            gate_logits_all.append(gate_logit.cpu().float())
-            cert_labels_all.append((ver > 0).cpu().float())
+            # sub-batch to keep memory in check (zonotope errors are heavy)
+            bs = ver_batch or b
+            ver_parts = []
+            for si in range(0, b, bs):
+                v, _, _ = branch_cnet.get_abs_loss(
+                    inputs[si:si+bs], targets[si:si+bs], eps, domain, 0, beta=1)
+                ver_parts.append(v.cpu().float())
+                del v
+                gc.collect()
+                torch.cuda.empty_cache()
+            ver = torch.cat(ver_parts)
+            del ver_parts
+            cert_labels_all.append((ver > 0).float())
+            del ver
 
     gate_logits = torch.cat(gate_logits_all)[:N].numpy()
     cert_labels = torch.cat(cert_labels_all)[:N].numpy()

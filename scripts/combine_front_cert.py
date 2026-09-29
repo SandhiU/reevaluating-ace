@@ -22,8 +22,8 @@ Usage:
   python combine_front_cert.py \
       --gate-npz 'dumps/*.npz' \
       --alpha-csv '~/research/labels_test/labels_alpha_crown_*.csv' \
-      --agg ~/research/scripts/results/agg_sel_eval_alpha_v3.csv \
-      --out results/agg_sel_eval_alpha_v3_with_acrown.csv
+      --agg ~/research/results/agg_<ver>.csv \
+      --out results/agg_<ver>_with_acrown.csv
 
 Per branch it prints and writes, for every tau on the grid:
   cert_box_recomputed  (= P(lb>tau AND box verifies), should match the agg cert_acc)
@@ -45,8 +45,8 @@ TAU_DEFAULT = [-2.0, -1.5, -1.0, -0.7, -0.5, -0.2, 0.0, 0.2, 0.5, 0.8, 1.0, 1.2,
 
 def _expand(p):
     """Expand ~ and $VARS. Single-quoting the glob in the shell (`'$HOME/dumps/*.npz'`)
-    suppresses $HOME expansion, so python must do it (18 Sep: that is why
-    `no gate npz matched $HOME/research/dumps/*.npz` appeared literally)."""
+    suppresses $HOME expansion, so python must do it (otherwise the glob is left
+    unexpanded and `no gate npz matched $HOME/research/dumps/*.npz` appears literally)."""
     return os.path.expandvars(os.path.expanduser(p))
 
 
